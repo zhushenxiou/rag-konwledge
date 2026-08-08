@@ -17,10 +17,6 @@ pgvector>=0.3.6
 pypdf>=5.0
 python-docx>=1.1
 
-# ---- 向量化 / 模型 ----
-sentence-transformers>=3.3
-modelscope>=1.30    # 国内下载 BGE 模型（HF 直连常不可用）
-
 # ---- 配置 ----
 pydantic-settings>=2.7
 python-dotenv>=1.0

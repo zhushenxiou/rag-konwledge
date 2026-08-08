@@ -44,7 +44,7 @@ const features = [
   {
     icon: '🔍',
     title: '向量检索',
-    desc: '本地 bge 中文 Embedding + PostgreSQL pgvector 余弦相似度检索',
+    desc: '千问 text-embedding-v4 中文 Embedding + PostgreSQL pgvector 余弦相似度检索',
   },
 ]
 
@@ -56,7 +56,7 @@ const stack = [
   'Element Plus',
   'FastAPI',
   'PostgreSQL + pgvector',
-  'bge-small-zh-v1.5',
+  'text-embedding-v4',
   'DeepSeek',
   'SSE',
 ]

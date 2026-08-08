@@ -13,8 +13,6 @@ os.environ["DATABASE_URL"] = "postgresql+psycopg2://postgres:123456@localhost:54
 os.environ["TEST_DATABASE_URL"] = os.environ["DATABASE_URL"]
 os.environ["LLM_API_KEY"] = "test-key"
 os.environ["LLM_BASE_URL"] = "https://example.invalid/v1"
-os.environ["EMBEDDING_PROVIDER"] = "local"
-os.environ["EMBEDDING_MODEL"] = "no-such-local-model"  # 测试不会真正加载
 os.environ["EMBEDDING_DIM"] = "8"  # 与 FakeEmbedder 维度一致
 
 import pytest  # noqa: E402

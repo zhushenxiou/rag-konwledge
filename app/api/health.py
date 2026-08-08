@@ -20,7 +20,7 @@ def health(db: Session = Depends(get_db)):
         "status": "ok",
         "database": db_status,
         "app": settings.app_name,
-        "embedding_provider": settings.embedding_provider,
-        "embedding_model": settings.embedding_model,
+        "embedding_model": settings.embedding_model_name,
+        "embedding_base_url": settings.embedding_base_url,
         "llm_model": settings.llm_model,
     }

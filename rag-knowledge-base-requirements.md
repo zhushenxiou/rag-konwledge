@@ -22,7 +22,7 @@
 | 后端 | FastAPI + Pydantic v2 | API 与参数校验 |
 | 后端 | SQLAlchemy 2 + Alembic | ORM 与数据库迁移 |
 | 数据库 | PostgreSQL 16 + pgvector | 业务表 + 向量检索 |
-| 向量模型 | OpenAI Embeddings，或本地 BGE-M3 | 文本向量化 |
+| 向量模型 | 千问 `text-embedding-v4`（DashScope 在线接口） | 文本向量化 |
 | 大模型 | OpenAI 兼容接口，或 Ollama / 通义等本地模型 | 答案生成 |
 | 文档解析 | pypdf / python-docx / markdown 解析 | 文档内容提取 |
 | 接口协议 | REST + SSE | 普通接口 + 流式回答 |
@@ -36,8 +36,9 @@
 
 Embedding 与 LLM 统一封装为"可配置 Provider"：
 
-- 演示环境如果无法联网，可切换本地模型
-- 通过环境变量切换，不改业务代码
+- Embedding 走千问 `text-embedding-v4` 在线接口（阿里云 DashScope）
+- 通过环境变量切换在线服务商，不改业务代码
+- Demo 前需确认网络可用（Embedding / LLM 均为在线接口）
 
 ## 3. 用户角色
 
@@ -305,7 +306,7 @@ flowchart LR
 
 1. 为什么选 pgvector：一个库同时解决业务数据和向量数据，适合中小规模；说明如何平滑迁移到独立向量库
 2. 分块策略：为什么设置 `chunk_size` 和 `overlap`，如何避免语义断裂
-3. Embedding 与 LLM Provider 抽象：如何支持本地模型和在线模型切换
+3. Embedding 与 LLM Provider 抽象：如何通过 base_url / api_key 切换不同在线服务商
 4. RAG 与微调的区别：知识更新快、无需重新训练，以及各自的适用场景
 5. 引用溯源：如何让模型只依据检索结果回答，降低幻觉
 6. SSE 流式输出：相比一次性返回的用户体验优势与实现方式
@@ -324,7 +325,7 @@ flowchart LR
 
 ## 13. 风险与注意事项
 
-- 在线 Embedding / LLM 依赖网络和费用，Demo 前要确认网络可用，或准备本地模型
+- Embedding / LLM 均为在线接口，依赖网络与 API 配额，Demo 前要确认网络可用
 - PDF 解析质量取决于扫描件还是文本型 PDF，演示素材优先选文本型
 - 大文件入库不要阻塞请求，入库放后台任务或线程池
 - SSE 流中断要能结束前端 loading 状态

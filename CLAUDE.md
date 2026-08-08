@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogram/rag-konwledge`, built as an interview demo. FastAPI backend + RAG pipeline (PostgreSQL 18 + pgvector 0.8.6, local embedding `BAAI/bge-small-zh-v1.5`, DeepSeek LLM via OpenAI-compatible API) plus a Vue 3 frontend. Code comments and the README are in Chinese.
+Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogram/rag-konwledge`, built as an interview demo. FastAPI backend + RAG pipeline (PostgreSQL 18 + pgvector 0.8.6, online 千问 embedding `text-embedding-v4` via 阿里云 DashScope, DeepSeek LLM via OpenAI-compatible API) plus a Vue 3 frontend. Code comments and the README are in Chinese.
 
 ## Environment / setup
 
 - Windows 11, conda env `langchain` (Python 3.13), PostgreSQL 18 on `localhost:5432` (user `postgres`).
-- Copy `.env.example` → `.env`; at minimum set `LLM_API_KEY`. `.env` is gitignored.
+- Copy `.env.example` → `.env`; at minimum set `LLM_API_KEY` and `EMBEDDING_API_KEY`. `.env` is gitignored.
 - One-time pgvector install: `powershell -ExecutionPolicy Bypass -File scripts/install_pgvector.ps1` (prebuilt DLL, no compiler).
 
 ### Machine gotchas (this Windows box)
@@ -17,7 +17,6 @@ Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogra
 - `conda run` mangles UTF-8 output (GBK console → UnicodeEncodeError). Use the env python directly (`"C:/ProgramData/miniconda3/envs/langchain/python.exe"`) with `PYTHONIOENCODING=utf-8`.
 - Chinese text in `curl -d` garbles on the GBK console → 400 "error parsing the body". Send JSON via Python or the `/docs` UI.
 - `alembic.ini` must stay pure ASCII (configparser reads it with the GBK locale and crashes on non-ASCII).
-- HuggingFace direct is blocked; the app downloads the embedding model via ModelScope `snapshot_download` with an HF-mirror fallback (`HF_ENDPOINT`).
 
 ## Commands
 
@@ -42,7 +41,7 @@ Frontend (`cd frontend`):
   - `retrieval.search_chunks` — pgvector cosine distance; `similarity = 1 - distance`, filter `distance <= 1 - threshold`, order asc, limit `top_k`.
   - `chunking.chunk_sections` — section-aware, splits at sentence boundaries (`chunk_size` / `overlap`), merges section metadata (pages, heading).
   - `parsing.parse_file` — txt/md/pdf/docx → `list[Section]` (md by heading, pdf by page).
-- `app/providers/` — `Embedder` (local sentence-transformers or OpenAI-compatible) and `LLM` (OpenAI-compatible) protocol abstractions. `get_embedder()` / `get_llm()` factories (lru_cached) select by env config; switch `EMBEDDING_PROVIDER=local|openai_compatible` with zero business-code changes.
+- `app/providers/` — `Embedder` (OpenAI-compatible, 千问 DashScope) and `LLM` (OpenAI-compatible) protocol abstractions. `get_embedder()` / `get_llm()` factories (lru_cached); provider is switched via `EMBEDDING_BASE_URL`/`LLM_BASE_URL` env config with zero business-code changes. No local model code.
 - `app/models.py` — `Document` / `Chunk` / `Conversation` / `Message`. `Chunk.embedding` is a pgvector `Vector(settings.embedding_dim)` column; `chunk_metadata` maps to DB column `metadata` (avoids a Declarative reserved name).
 - `app/database.py` — engine, `SessionLocal`, `Base`, `get_db`.
 - `app/config.py` — pydantic-settings, all config from `.env` / env vars.
@@ -50,7 +49,7 @@ Frontend (`cd frontend`):
 
 ### Backend invariants / gotchas
 - **DB session lifetime**: async background work (document ingest, SSE chat streaming) must open its own `SessionLocal()`, because the request-scoped `get_db` session closes when the request returns. See `_run_ingest` in `documents.py` and `event_stream` in `chat.py`.
-- **Embedding-dim coupling**: `EMBEDDING_DIM` (`.env`) must equal the model's dim and the `Vector(...)` column. Changing the embedding model requires updating both and rebuilding tables (drop + `alembic upgrade head`).
+- **Embedding-dim coupling**: `EMBEDDING_DIM` (`.env`) must equal the model's dim and the `Vector(...)` column. `OpenAICompatEmbedder` explicitly passes `dimensions=EMBEDDING_DIM` because online models default higher (Qwen `text-embedding-v3/v4` default 1024) — forgetting this inserts 1024-dim vectors into the 512 column and fails. Changing the embedding model requires updating both and rebuilding tables (drop + `alembic upgrade head`); even with the same dim, **vectors from different models live in different spaces — re-ingest documents after switching models**.
 - **Cascades are DB-level** (`ON DELETE CASCADE`); ORM relationships use `passive_deletes=True`.
 - Tests inject `FakeEmbedder` (deterministic 8-dim char-hash vectors) and `FakeLLM` directly into service calls — no network, no model download. `tests/conftest.py` sets env vars (incl. `rag_kb_test` DB) before any `app` import because `Settings` is a process-level cached singleton.
 

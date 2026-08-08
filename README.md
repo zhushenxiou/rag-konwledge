@@ -1,12 +1,12 @@
 # 企业知识库问答系统（后端 + RAG）
 
-基于 **PostgreSQL + pgvector + FastAPI + 本地 Embedding（bge-small-zh-v1.5）+ DeepSeek** 实现的企业知识库问答系统。只包含**后端与 RAG 部分**，前端未实现，全部能力通过 REST + SSE 接口暴露，可直接作为面试 Demo 或后续前端对接的后端服务。
+基于 **PostgreSQL + pgvector + FastAPI + 在线 Embedding（千问 text-embedding-v4）+ DeepSeek** 实现的企业知识库问答系统。只包含**后端与 RAG 部分**，前端未实现，全部能力通过 REST + SSE 接口暴露，可直接作为面试 Demo 或后续前端对接的后端服务。
 
 - 文档上传即异步入库：解析 → 分块 → 向量化 → 写入 pgvector，状态机 `pending → processing → ready / failed`，失败可手动重试
 - 问答全链路：问题向量化 → 余弦相似度检索（Top-K + 阈值过滤）→ 拼 Prompt → 大模型 **SSE 流式**返回 → 带出处引用（文档名 + 相似度 + 片段）
 - 检索无依据时**明确提示**，不编造答案，降低幻觉
 - 会话与消息持久化，删除文档级联删除分块与向量
-- Embedding / LLM 均支持 Provider 抽象，可通过环境变量切换本地 / 在线
+- Embedding / LLM 均走在线 OpenAI 兼容接口，可通过环境变量切换服务商
 
 ## 技术栈
 
@@ -15,7 +15,7 @@
 | Web 框架 | FastAPI + Uvicorn |
 | 数据库 | PostgreSQL 18 + pgvector 0.8.6 |
 | ORM / 迁移 | SQLAlchemy 2.0 + Alembic |
-| 向量模型 | `BAAI/bge-small-zh-v1.5`（512 维，本地推理，ModelScope 下载） |
+| 向量模型 | 千问 `text-embedding-v4`（512 维，DashScope 在线接口） |
 | LLM | DeepSeek `deepseek-chat`（OpenAI 兼容接口，SSE 流式） |
 | 文档解析 | pypdf / python-docx / 内置 txt、md 解析 |
 | 测试 | pytest + pytest-asyncio（Fake Embedder / Fake LLM 注入，不触网） |
@@ -89,10 +89,10 @@ copy .env.example .env
 | `LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.deepseek.com/v1` |
 | `LLM_API_KEY` | **必填**，大模型密钥 | 空 |
 | `LLM_MODEL` | 模型名 | `deepseek-chat` |
-| `EMBEDDING_PROVIDER` | `local` 本地模型 / `openai_compatible` 在线 | `local` |
-| `EMBEDDING_MODEL` | 本地模型名 | `BAAI/bge-small-zh-v1.5` |
-| `EMBEDDING_DIM` | **须与模型维度一致**（bge-small-zh=512） | `512` |
-| `HF_ENDPOINT` | 模型下载镜像（本地未缓存时） | `https://hf-mirror.com` |
+| `EMBEDDING_BASE_URL` | OpenAI 兼容 embedding 接口地址 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `EMBEDDING_API_KEY` | **必填**，embedding 密钥（阿里云 DashScope） | 空 |
+| `EMBEDDING_MODEL_NAME` | embedding 模型名 | `text-embedding-v4` |
+| `EMBEDDING_DIM` | **须与模型输出维度 / 数据库 Vector 列一致**（代码会显式传 `dimensions`） | `512` |
 | `CHUNK_SIZE` / `OVERLAP` | 分块大小 / 重叠 | `500` / `100` |
 | `TOP_K` | 检索返回分块数 | `4` |
 | `SIMILARITY_THRESHOLD` | 相似度阈值，低于则判为无依据 | `0.5` |
@@ -206,10 +206,10 @@ conda run -n langchain python scripts/e2e_verify.py
 - **检索**：pgvector `<=>` 余弦距离，`similarity = 1 - distance`，过滤 `distance <= 1 - threshold`，按距离升序取 `TOP_K`。
 - **防幻觉**：Prompt 只包含检索命中的分块并强制要求标注 `[1]`、`[2]` 编号；无依据时直接返回 `no_evidence`，不调用模型编造。
 - **可追溯**：`messages.sources`(jsonb) 记录每个回答引用的文档 / 分块 / 相似度 / 片段。
-- **Provider 抽象**：`EMBEDDING_PROVIDER` 与 `LLM_BASE_URL` 可在本地与在线之间切换，业务代码零改动。
+- **Provider 抽象**：`EMBEDDING_BASE_URL` 与 `LLM_BASE_URL` 可切换不同在线服务商（千问 / DeepSeek 等），业务代码零改动。
 
 ## 环境要求
 
 - Windows 11，conda（`langchain` 环境），Python 3.13
 - PostgreSQL 18 + pgvector（`scripts/install_pgvector.ps1` 提供预编译安装）
-- 首次启动会自动从 ModelScope 下载 bge-small-zh-v1.5（约 100MB）到 `./data/models`
+- 无需本地模型，配置 `EMBEDDING_API_KEY`（阿里云 DashScope）即可在线向量化

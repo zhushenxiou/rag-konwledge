@@ -23,15 +23,11 @@ class Settings(BaseSettings):
     top_k: int = 4
     similarity_threshold: float = 0.5
 
-    # ---- Embedding（向量化）----
-    embedding_provider: str = "local"          # local | openai_compatible
-    embedding_model: str = "BAAI/bge-small-zh-v1.5"
-    embedding_dim: int = 512                    # 必须与 embedding 模型维度一致
-    model_cache_dir: str = "./data/models"      # 模型下载缓存目录
-    hf_endpoint: str = "https://hf-mirror.com"
-    embedding_base_url: str = ""
+    # ---- Embedding（在线 OpenAI 兼容接口，千问 DashScope）----
+    embedding_dim: int = 512                    # 必须与 embedding 模型输出维度 / 数据库 Vector 列一致
+    embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_api_key: str = ""
-    embedding_model_name: str = ""
+    embedding_model_name: str = "text-embedding-v4"
 
     # ---- LLM（OpenAI 兼容接口）----
     llm_base_url: str = "https://api.deepseek.com/v1"

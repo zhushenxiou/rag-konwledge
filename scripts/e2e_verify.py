@@ -1,4 +1,4 @@
-"""端到端验收脚本：对照需求 §10 验收清单（去前端项）逐项验证。
+"""端到端验收脚本：对照 README「Demo 验收清单」（去前端项）逐项验证。
 
 用 urllib 直连本地 API（本机 httpx->localhost 有 502 怪癖）。
 用法: conda run -n langchain python e2e_verify.py

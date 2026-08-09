@@ -14,10 +14,12 @@ from collections.abc import AsyncIterator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import Conversation, Message
-from app.providers import get_embedder, get_llm
+from app.providers import get_embedder, get_llm, get_reranker
 from app.providers.embeddings import Embedder
 from app.providers.llm import LLM
+from app.providers.rerank import Reranker
 from app.services.retrieval import RetrievalHit, search_chunks
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,31 @@ def build_messages(question: str, hits: list[RetrievalHit]) -> list[dict[str, st
     ]
 
 
-def _save_message(db: Session, conversation_id, role: str, content: str, sources: list[dict]) -> Message:
+def _rerank_hits(
+    reranker: Reranker, question: str, hits: list[RetrievalHit], top_k: int
+) -> list[RetrievalHit]:
+    """在线重排：调 rerank 模型按 (query, chunk) 相关性打分，取 top_k。
+
+    同步函数，由调用方放到 asyncio.to_thread 里跑。相似度字段改写为
+    rerank 模型的相关性分数（0~1，请求内相对值），让 sources 展示的
+    similarity 与最终排序口径一致。
+    """
+    scores = reranker.rerank(question, [h.chunk.content for h in hits], top_k)
+    ranked = sorted(zip(hits, scores), key=lambda pair: pair[1], reverse=True)
+    out: list[RetrievalHit] = []
+    for hit, score in ranked[:top_k]:
+        hit.similarity = round(float(score), 4)
+        out.append(hit)
+    return out
+
+
+def _save_message(
+    db: Session,
+    conversation_id,
+    role: str,
+    content: str,
+    sources: list[dict],
+) -> Message:
     msg = Message(
         conversation_id=conversation_id,
         role=role,
@@ -74,9 +100,11 @@ async def chat_events(
     conversation_id,
     embedder: Embedder | None = None,
     llm: LLM | None = None,
+    reranker: Reranker | None = None,
 ) -> AsyncIterator[dict]:
     embedder = embedder or get_embedder()
     llm = llm or get_llm()
+    reranker = reranker or get_reranker()
 
     # ---- 1. 会话：创建或复用，保存用户问题 ----
     if conversation_id is not None:
@@ -92,14 +120,32 @@ async def chat_events(
     _save_message(db, conversation.id, "user", question, [])
     db.commit()
 
-    # ---- 2. 向量检索 ----
+    # ---- 2. 混合检索（关键词 BM25 + 语义向量，RRF 融合）----
     try:
         query_vec = await asyncio.to_thread(embedder.embed_query, question)
     except Exception as exc:  # noqa: BLE001
         logger.exception("embed query failed")
         yield {"type": "error", "message": f"问题向量化失败: {exc}"}
         return
-    hits = search_chunks(db, query_vec)
+    # 开启重排时先召回更宽的候选池（rerank_candidates），重排后再收窄到 top_k
+    search_k = settings.rerank_candidates if settings.rerank_enabled else settings.top_k
+    try:
+        hits = search_chunks(db, query_vec, question, top_k=search_k)
+    except ValueError as exc:
+        yield {"type": "error", "message": f"检索参数错误: {exc}"}
+        return
+    logger.info("retrieval hits=%d", len(hits))
+
+    # ---- 2.5 在线重排（非致命：失败回退原召回顺序）----
+    if settings.rerank_enabled and settings.rerank_api_key and len(hits) > 1:
+        try:
+            hits = await asyncio.to_thread(_rerank_hits, reranker, question, hits, settings.top_k)
+            logger.info("rerank applied: candidates=%d -> top_k=%d", search_k, len(hits))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rerank failed, fallback to original order: %s", exc)
+            hits = hits[: settings.top_k]
+    else:
+        hits = hits[: settings.top_k]
 
     # ---- 3. 无依据处理 ----
     if not hits:

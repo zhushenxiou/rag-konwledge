@@ -24,7 +24,10 @@ export async function streamChat(
   await fetchEventSource('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, conversation_id: conversationId }),
+    body: JSON.stringify({
+      question,
+      conversation_id: conversationId,
+    }),
     signal,
     // 不监听 visibilitychange：默认行为是在窗口隐藏时 abort 当前流、恢复可见时
     // 用相同 POST body 重新发起请求（相当于把同一问题再问一次）。对 POST 问答

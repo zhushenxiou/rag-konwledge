@@ -40,8 +40,8 @@ rag-konwledge/
 ├── scripts/
 │   ├── install_pgvector.ps1  # 安装 pgvector 预编译包到 PostgreSQL 18
 │   ├── init_db.py            # 建库 + CREATE EXTENSION vector
-│   ├── run_dev.ps1           # 一键启动开发服务
 │   └── e2e_verify.py         # 端到端验收脚本（对照 README「Demo 验收清单」，需服务已启动）
+├── setup.md                  # 环境搭建与启动教程
 ├── frontend/                 # 前端（Vite + Vue3 + vue-router + Tailwind v4）
 └── tests/                    # pytest：分块 / 检索 / 问答 全链路（Fake 注入）
 ```
@@ -61,26 +61,12 @@ frontend/
 
 ## 快速开始
 
-### 1. 环境准备
+完整搭建与启动教程见 [setup.md](setup.md)：pgvector 安装 → 依赖 → `.env` 配置 → 初始化数据库 → 启动后端（纯命令）→ 启动前端（pnpm）→ 测试。
 
-- **PostgreSQL 18** 运行于 `localhost:5432`，账号 `postgres` / 密码在 `.env` 中配置
-- **conda** 环境 `langchain`（Python 3.13），安装依赖：
-
-```powershell
-conda run -n langchain pip install -r requirements.txt
-```
-
-- 若 PostgreSQL 尚未安装 pgvector，执行（仅需一次）：
+### 环境变量参考
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install_pgvector.ps1
-```
-
-### 2. 配置环境变量
-
-```powershell
-copy .env.example .env
-# 编辑 .env，至少填入 LLM_API_KEY
+copy .env.example .env   # 编辑 .env，至少填入 LLM_API_KEY、EMBEDDING_API_KEY
 ```
 
 | 变量 | 说明 | 默认值 |
@@ -106,35 +92,7 @@ copy .env.example .env
 
 > `EMBEDDING_DIM` 与数据库列维度强相关：换模型后需同时修改 `.env` 并重建表（删表后 `alembic upgrade head`）。
 
-### 3. 初始化数据库
-
-```powershell
-conda run -n langchain python scripts/init_db.py
-conda run -n langchain alembic upgrade head
-```
-
-### 4. 启动服务
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_dev.ps1
-# 或直接：
-conda run -n langchain uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-启动后：
-- 接口文档：<http://localhost:8000/docs>
-- 健康检查：<http://localhost:8000/api/health>
-
-### 5. 启动前端（可选，需先启动后端）
-
-```powershell
-cd frontend
-pnpm install
-pnpm dev
-# 打开 http://localhost:5173（/api 自动代理到 :8000）
-```
-
-生产构建：`cd frontend && pnpm build`（产物在 `frontend/dist/`）。
+前端启动：`cd frontend && pnpm install && pnpm dev`（:5173，`/api` 代理到 :8000）。
 
 > 对话流使用 **SSE**（`POST /api/chat` 的 `text/event-stream`）。前端使用 `@microsoft/fetch-event-source` 库解析（`src/api/chat.ts`），原生 `EventSource` 只支持 GET、无法携带 POST body。
 
@@ -197,7 +155,7 @@ curl http://localhost:8000/api/conversations/{id}/messages
 ## 测试
 
 ```powershell
-conda run -n langchain python -m pytest -q
+"C:/ProgramData/miniconda3/envs/langchain/python.exe" -m pytest -q
 ```
 
 26 个用例，覆盖：分块大小 / overlap / 句子边界、混合检索 Top-K 排序与阈值过滤、BM25 + 语义两路召回与 RRF 融合（含关键词通道挽救低相似度命中）、问答 SSE 事件与消息落库、无依据处理、在线重排（重排排序 / 失败回退）、文档入库状态机（成功与失败）、文档重命名（成功 / 空名 / 不存在）。测试使用独立的 `rag_kb_test` 库，Embedding / LLM / Rerank 均为 Fake 实现，**不触网、不下载模型**。
@@ -205,7 +163,7 @@ conda run -n langchain python -m pytest -q
 另有端到端验收脚本（对照下文「Demo 验收清单」逐项断言，含真实模型调用，需服务已启动）：
 
 ```powershell
-conda run -n langchain python scripts/e2e_verify.py
+"C:/ProgramData/miniconda3/envs/langchain/python.exe" scripts/e2e_verify.py
 ```
 
 ## 系统设计

@@ -20,16 +20,15 @@ Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogra
 
 ## Commands
 
-Backend (run from repo root):
-- Init DB: `conda run -n langchain python scripts/init_db.py` then `conda run -n langchain alembic upgrade head`
-- Dev server: `powershell -ExecutionPolicy Bypass -File scripts/run_dev.ps1` (init + migrate + uvicorn on :8000), or `conda run -n langchain uvicorn app.main:app --host 0.0.0.0 --port 8000`
-- Tests: `conda run -n langchain python -m pytest -q` (26 tests; separate `rag_kb_test` DB, no network/model)
-- Single test: `conda run -n langchain python -m pytest tests/test_chat.py::test_chat_no_evidence_when_nothing_retrieved -q`
-- E2E acceptance (server must be running; real model calls): `conda run -n langchain python scripts/e2e_verify.py`
+启动教程见根目录 `setup.md`（后端纯命令，不用 ps1 脚本）。
 
-Frontend (`cd frontend`):
-- `pnpm install` · `pnpm dev` (:5173, proxies `/api` → :8000) · `pnpm build` (runs `vue-tsc -b && vite build`)
-- On a fresh clone run `pnpm build` once before `vue-tsc` — the Element Plus auto-import plugins generate `src/components.d.ts` / `src/auto-imports.d.ts` that type checking depends on.
+- 前端: `cd frontend && pnpm install && pnpm dev`（:5173，`/api` 代理到 :8000）· `pnpm build`（`vue-tsc -b && vite build`）
+- 后端（先 `conda activate langchain`，设 `$env:PYTHONIOENCODING="utf-8"` 避开 conda run 的 GBK 崩溃）:
+  - 初始化+迁移（幂等）: `python scripts/init_db.py` 再 `python -m alembic upgrade head`
+  - 启动: `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`
+  - 测试: `python -m pytest -q`（26 tests; 独立 `rag_kb_test` DB, 不触网/不调模型）
+  - 单个测试: `python -m pytest tests/test_chat.py::test_chat_no_evidence_when_nothing_retrieved -q`
+  - E2E 验收（服务须已启动; 真实模型调用）: `python scripts/e2e_verify.py`
 
 ## Architecture
 

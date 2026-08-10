@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useVirtualizer } from '@tanstack/vue-virtual'
 import { streamChat } from '@/api/chat'
 import {
   createConversation,
@@ -144,8 +145,13 @@ async function loadConversation(conv: Conversation) {
       role: m.role,
       content: m.content,
       sources: m.sources.length ? m.sources : null,
-      noEvidence: m.content.includes('没有找到足够依据'),
+      // 无依据消息在后端始终以「空来源的助手消息」落库（见 chat_service.NO_EVIDENCE_MSG）。
+      // 用结构信号判定而非匹配文案，避免与后端措辞耦合、也防正常回答误标。
+      noEvidence: m.role === 'assistant' && m.sources.length === 0,
     }))
+    // 恢复会话状态：末条为无依据时头部 tag 与实时行为保持一致
+    const last = messages.value[messages.value.length - 1]
+    status.value = last?.noEvidence ? 'no_evidence' : messages.value.length ? 'done' : 'idle'
   } catch {
     // 忽略：历史加载失败时静默保留当前空状态
   }
@@ -169,22 +175,50 @@ async function onDeleteConversation(id: string) {
   if (conversationId.value === id) newChat()
 }
 
-// ---- 滚动到底部 ----
-const scrollEl = ref<HTMLElement | null>(null)
+// ---- 虚拟滚动（消息量大时只渲染可视窗口） ----
+// 注意：el-scrollbar 通过 expose() 暴露 wrapRef，Vue 的 exposeProxy 用
+// proxyRefs 包装，运行时拿到的已是【解包后的 DOM 元素】。而 EP 的 .d.ts
+// 仍把 wrapRef 声明为 Ref，两者不一致 —— 这里用自定义窄类型标注为 DOM，
+// 访问时直接取 wrapRef，不要再加 .value。
+const scrollbarRef = ref<{ wrapRef: HTMLDivElement | undefined }>()
 
+// 每行高度的初始估算
+const USER_MSG_EST = 56
+const ASSISTANT_MSG_EST = 220
+
+const virtualizer = useVirtualizer(
+  computed(() => ({
+    count: messages.value.length,
+    getScrollElement: () => scrollbarRef.value?.wrapRef ?? null,
+    estimateSize: (index: number) =>
+      messages.value[index]?.role === 'user' ? USER_MSG_EST : ASSISTANT_MSG_EST,
+    overscan: 5,
+    getItemKey: (index: number) => messages.value[index]?.id ?? index,
+  })),
+)
+
+/** 滚动到底部：虚拟列表用 scrollToIndex 定位最后一条。 */
 async function scrollToBottom() {
   await nextTick()
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
+  const last = messages.value.length - 1
+  if (last >= 0) virtualizer.value.scrollToIndex(last, { align: 'end' })
 }
 
-// 消息新增 / 内容增长 / 状态变化时滚动到底部
+/** 是否接近底部（阈值内）——流式增长时只在接近底部才跟随，用户上翻不打扰。 */
+function isNearBottom() {
+  const wrap = scrollbarRef.value?.wrapRef
+  return wrap ? wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80 : false
+}
+
+// 新增消息 / 载入会话：直接滚到底（用户在互动中）
+watch(() => messages.value.length, scrollToBottom)
+
+// 流式内容增长 / 状态变化：仅在接近底部时跟随
 watch(
-  () => [
-    messages.value.length,
-    status.value,
-    messages.value[messages.value.length - 1]?.content,
-  ],
-  scrollToBottom,
+  () => [status.value, messages.value[messages.value.length - 1]?.content],
+  () => {
+    if (isNearBottom()) scrollToBottom()
+  },
 )
 </script>
 
@@ -204,46 +238,54 @@ watch(
     <div class="flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
       <header class="flex h-14 shrink-0 items-center border-b border-slate-200 bg-white/70 px-6 backdrop-blur">
-      <h2 class="text-sm font-semibold text-slate-700">
-        {{ conversationId ? '对话' : '新对话' }}
-      </h2>
-      <span
-        v-if="status === 'no_evidence'"
-        class="ml-3 rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-600"
-      >
-        未找到足够依据
-      </span>
-    </header>
-
-    <!-- 消息区 -->
-    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto">
-      <!-- 空状态 -->
-      <div
-        v-if="!messages.length"
-        class="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6 text-center"
-      >
-        <el-avatar
-          :size="56"
-          class="mb-4"
-          :style="{ backgroundColor: '#4f46e5', color: '#fff', fontSize: '24px', fontWeight: 700 }"
+        <h2 class="text-sm font-semibold text-slate-700">
+          {{ conversationId ? '对话' : '新对话' }}
+        </h2>
+        <el-tag
+          v-if="status === 'no_evidence'"
+          class="ml-3"
+          type="warning"
+          effect="light"
+          size="small"
         >
-          知
-        </el-avatar>
-        <h2 class="text-xl font-semibold text-slate-800">企业知识库问答</h2>
-        <p class="mt-2 text-sm text-slate-500">
-          基于 RAG 的智能问答，回答附带引用来源。先在「知识库」页上传资料，再向我提问。
-        </p>
-      </div>
+          未找到足够依据
+        </el-tag>
+      </header>
 
-      <!-- 消息列表 -->
-      <div v-else class="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 py-6">
-        <MessageItem v-for="m in messages" :key="m.id" :message="m" />
-        <div class="h-1" />
-      </div>
-    </div>
+      <!-- 消息区（虚拟滚动，只渲染可视窗口） -->
+      <el-scrollbar ref="scrollbarRef" class="min-h-0 flex-1">
+        <!-- 空状态 -->
+        <el-empty
+          v-if="!messages.length"
+          class="h-full min-h-80"
+          description="企业知识库问答"
+        >
+          <p class="mt-1 text-sm text-slate-500">
+            基于 RAG 的智能问答，回答附带引用来源。先在「知识库」页上传资料，再向我提问。
+          </p>
+        </el-empty>
 
-    <!-- 输入区 -->
-    <ChatInput :streaming="status === 'streaming'" @send="sendQuestion" @stop="stop" />
+        <!-- 消息列表：外层撑总高，行用绝对定位 + translateY 排布 -->
+        <div
+          v-else
+          class="relative mx-auto w-full max-w-3xl"
+          :style="{ height: `${virtualizer.getTotalSize()}px` }"
+        >
+          <div
+            v-for="row in virtualizer.getVirtualItems()"
+            :key="messages[row.index].id"
+            :data-index="row.index"
+            :ref="(el) => virtualizer.measureElement(el as HTMLElement | null)"
+            class="absolute left-0 top-0 w-full px-4 py-3"
+            :style="{ transform: `translateY(${row.start}px)` }"
+          >
+            <MessageItem :message="messages[row.index]" />
+          </div>
+        </div>
+      </el-scrollbar>
+
+      <!-- 输入区 -->
+      <ChatInput :streaming="status === 'streaming'" @send="sendQuestion" @stop="stop" />
     </div>
   </div>
 </template>

@@ -40,6 +40,7 @@ python -m alembic upgrade head
 ## 6. 启动后端
 
 ```powershell
+conda activate langchain
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 

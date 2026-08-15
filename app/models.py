@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -75,6 +75,9 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # 对话记忆（上下文窗口管理）：滚动摘要 + 关键事实。仅后端 Prompt 使用，前端不展示。
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_facts: Mapped[list] = mapped_column(JSONB, default=list)
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
@@ -97,6 +100,8 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20))  # user / assistant
     content: Mapped[str] = mapped_column(Text)
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    # 已被滚动压缩折叠进 summary 的消息（仍展示给用户，但不进 LLM Prompt）
+    is_folded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

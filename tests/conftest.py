@@ -18,6 +18,9 @@ os.environ["EMBEDDING_DIM"] = "8"  # 与 FakeEmbedder 维度一致
 os.environ["RERANK_ENABLED"] = "true"
 os.environ["RERANK_API_KEY"] = "test-key"
 os.environ["RERANK_BASE_URL"] = "https://example.invalid/v1"
+# 对话记忆默认关闭：既有用例保持纯单轮（恰好 1 次 LLM 调用）；记忆用例显式传
+# memory_enabled=True 开启（memory.py 相关断言见 tests/test_memory.py）
+os.environ["MEMORY_ENABLED"] = "false"
 
 import pytest  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402

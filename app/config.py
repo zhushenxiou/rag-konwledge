@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     rerank_model_name: str = "qwen3-rerank"
     rerank_candidates: int = 10                # 参与重排的候选数（先召回 10，重排后取 top_k）
 
+    # ---- 对话记忆（上下文窗口管理：历史压缩 + 关键信息抽取）----
+    memory_enabled: bool = True               # 总开关；关掉则退化为纯单轮（不传历史）
+    memory_recent_tokens: int = 1200          # 最近原文窗口估算 token 预算，超过触发滚动压缩
+    memory_recent_rounds: int = 2             # 压缩时保留的最近完整对话轮数（不进摘要，保真）
+    memory_max_facts: int = 20                # 关键事实条目上限（超限由 LLM 在更新时裁剪）
+    memory_extract_every_turn: bool = True    # 每轮抽取关键事实（False → 仅压缩时抽取）
+    memory_rewrite_enabled: bool = True       # 多轮时改写检索问题（指代消解）
+
     # ---- 测试 ----
     test_database_url: str = ""
 

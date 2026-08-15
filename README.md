@@ -4,6 +4,7 @@
 
 - 文档上传即异步入库：解析 → 分块 → 向量化 → 写入 pgvector，状态机 `pending → processing → ready / failed`，失败可手动重试
 - 问答全链路：混合检索（关键词 BM25 + 语义向量，**RRF 融合**）→ **在线重排（qwen3-rerank，可配置）** → 拼 Prompt → 大模型 **SSE 流式**返回 → 带出处引用（文档名 + 相似度 + 片段）
+- **上下文窗口管理**：多轮对话自动滚动压缩（旧轮折叠进摘要）+ 每轮关键事实抽取 + 追问改写（指代消解，仅用于检索），长对话降低 Token 消耗且保留关键信息
 - 检索无依据时**明确提示**，不编造答案，降低幻觉
 - 会话与消息持久化，删除文档级联删除分块与向量
 - Embedding / LLM / Rerank 均走在线 OpenAI 兼容接口，可通过环境变量切换服务商
@@ -27,15 +28,15 @@
 ```
 rag-konwledge/
 ├── README.md  .env.example  requirements.txt  alembic.ini  pyproject.toml
-├── alembic/                  # 数据库迁移（0001：建 4 张表 + vector(512)；0002：embedding HNSW 索引；0003：messages.retrieval_mode；0004：删除 retrieval_mode）
+├── alembic/                  # 数据库迁移（0001：建 4 张表 + vector(512)；0002：embedding HNSW 索引；0003：messages.retrieval_mode；0004：删除 retrieval_mode；0005：对话记忆列 summary / key_facts / is_folded）
 ├── app/
 │   ├── main.py               # FastAPI 入口，挂载路由、CORS
-│   ├── config.py             # pydantic-settings，全部配置从 .env 读取
+│   ├── config.py             # pydantic-settings，全部配置从 .env 读取（含对话记忆组 MEMORY_*）
 │   ├── database.py           # engine / SessionLocal / Base / get_db
-│   ├── models.py             # Document / Chunk(含 embedding) / Conversation / Message
+│   ├── models.py             # Document / Chunk(含 embedding) / Conversation(含记忆列) / Message(含 is_folded)
 │   ├── schemas.py            # Pydantic v2 请求/响应模型
 │   ├── providers/            # Embedding + LLM + Rerank（均为在线 OpenAI 兼容/可切换抽象）
-│   ├── services/             # 解析 / 分块 / 入库状态机 / 检索 / 问答(SSE)
+│   ├── services/             # 解析 / 分块 / 入库状态机 / 检索 / 问答(SSE) / 对话记忆(memory.py)
 │   └── api/                  # documents / chat / conversations / health
 ├── scripts/
 │   ├── install_pgvector.ps1  # 安装 pgvector 预编译包到 PostgreSQL 18
@@ -89,6 +90,12 @@ copy .env.example .env   # 编辑 .env，至少填入 LLM_API_KEY、EMBEDDING_AP
 | `RERANK_API_KEY` | **重排密钥**（通常与 `EMBEDDING_API_KEY` 相同）；留空则跳过重排 | 空 |
 | `RERANK_MODEL_NAME` | 重排模型 | `qwen3-rerank` |
 | `RERANK_CANDIDATES` | 参与重排的候选数（先召回 N，重排后取 `TOP_K`） | `10` |
+| `MEMORY_ENABLED` | 对话记忆总开关；关掉退化为纯单轮（不传历史） | `true` |
+| `MEMORY_RECENT_TOKENS` | 最近原文窗口估算 token 预算，超过触发滚动压缩 | `1200` |
+| `MEMORY_RECENT_ROUNDS` | 压缩时保留的最近完整对话轮数（不进摘要，保真） | `2` |
+| `MEMORY_MAX_FACTS` | 关键事实条目上限（超限由 LLM 在更新时裁剪） | `20` |
+| `MEMORY_EXTRACT_EVERY_TURN` | 每轮抽取关键事实（`false` → 仅压缩时抽取） | `true` |
+| `MEMORY_REWRITE_ENABLED` | 多轮时改写检索问题（指代消解；改写只用于检索） | `true` |
 
 > `EMBEDDING_DIM` 与数据库列维度强相关：换模型后需同时修改 `.env` 并重建表（删表后 `alembic upgrade head`）。
 
@@ -134,6 +141,8 @@ copy .env.example .env   # 编辑 .env，至少填入 LLM_API_KEY、EMBEDDING_AP
 > 不传 `conversation_id` 时自动新建会话并以问题前 30 字作标题；传既有 id 则沿用该会话。`conversation_id` 用返回的 `done` 事件值即可追问。
 >
 > 检索固定为**混合模式**（关键词 BM25 + 语义向量，RRF 融合排序），不做模式选择。
+>
+> 多轮追问时，后端会对检索问题做**改写**（指代消解），改写只影响检索、不影响生成；长对话会自动做**滚动压缩 + 关键事实抽取**，这些记忆维护调用均**非致命**——失败静默回退，不产生 `error` 事件，也不影响主回答。
 
 ## 快速演示
 
@@ -158,7 +167,7 @@ curl http://localhost:8000/api/conversations/{id}/messages
 "C:/ProgramData/miniconda3/envs/langchain/python.exe" -m pytest -q
 ```
 
-26 个用例，覆盖：分块大小 / overlap / 句子边界、混合检索 Top-K 排序与阈值过滤、BM25 + 语义两路召回与 RRF 融合（含关键词通道挽救低相似度命中）、问答 SSE 事件与消息落库、无依据处理、在线重排（重排排序 / 失败回退）、文档入库状态机（成功与失败）、文档重命名（成功 / 空名 / 不存在）。测试使用独立的 `rag_kb_test` 库，Embedding / LLM / Rerank 均为 Fake 实现，**不触网、不下载模型**。
+32 个用例，覆盖：分块大小 / overlap / 句子边界、混合检索 Top-K 排序与阈值过滤、BM25 + 语义两路召回与 RRF 融合（含关键词通道挽救低相似度命中）、问答 SSE 事件与消息落库、无依据处理、在线重排（重排排序 / 失败回退）、文档入库状态机（成功与失败）、文档重命名（成功 / 空名 / 不存在）、**对话记忆**（每轮事实抽取 / 超预算滚动压缩 / 追问改写驱动检索 / 记忆调用失败回退 / 关闭时零额外调用 / token 估算）。测试使用独立的 `rag_kb_test` 库，Embedding / LLM / Rerank 均为 Fake 实现，**不触网、不下载模型**。
 
 另有端到端验收脚本（对照下文「Demo 验收清单」逐项断言，含真实模型调用，需服务已启动）：
 
@@ -204,6 +213,8 @@ curl http://localhost:8000/api/conversations/{id}/messages
 | title | varchar | 会话标题 |
 | created_at | timestamp | 创建时间 |
 | updated_at | timestamp | 更新时间 |
+| summary | text | 滚动压缩后的对话摘要（仅后端 Prompt 使用，前端不展示） |
+| key_facts | jsonb | 抽取出的长期关键事实数组（用户偏好 / 确认参数 / 结论等） |
 
 **messages 消息表**
 
@@ -214,6 +225,7 @@ curl http://localhost:8000/api/conversations/{id}/messages
 | role | varchar | user / assistant |
 | content | text | 消息内容 |
 | sources | jsonb | 回答引用的来源列表 |
+| is_folded | boolean | 已被滚动压缩折叠进摘要的消息（前端仍展示，不进 LLM Prompt） |
 | created_at | timestamp | 创建时间 |
 
 ### RAG 主流程
@@ -225,13 +237,15 @@ flowchart LR
     C --> D[Embedding 向量化]
     D --> E[(PostgreSQL + pgvector)]
 
-    F[用户提问] --> G[问题检索]
+    F[用户提问] --> F1[对话记忆：改写检索问题 + 滚动压缩旧轮]
+    F1 --> G[问题检索]
     G --> H[多路召回 + RRF 取 Top-K]
     H --> H2[在线重排 qwen3-rerank]
-    H2 --> I[拼装 Prompt]
+    H2 --> I[拼装 Prompt（摘要 + 关键事实 + 最近原文 + 检索片段）]
     I --> J[LLM 生成]
     J --> K[SSE 流式返回]
     K --> L[前端展示回答与来源]
+    K --> M[每轮抽取关键事实，持久化到会话]
     E -.提供上下文.-> H
 ```
 
@@ -246,12 +260,15 @@ flowchart LR
 **问答流程**
 
 1. 保存用户问题到 `messages`
-2. 混合召回：关键词（jieba + BM25）与语义（pgvector 余弦）两路并发召回候选
-3. 对两路候选做 RRF 融合排序，过滤低相关分块，取 Top-K
-4. 可选：对候选做在线重排（qwen3-rerank），再收窄到 Top-K（调用失败回退原排序）
-5. 将分块内容、用户问题组装成 Prompt
-6. LLM 流式生成，通过 SSE 返回前端
-7. 回答完成后保存消息与来源列表
+2. **对话记忆维护（非致命）**：
+   - 若未折叠原文窗口的估算 token 超过 `memory_recent_tokens`，把最旧几轮折叠进 `conversations.summary`（`maintain_memory` 一次调用产出新摘要 + 新事实），被折叠消息标 `is_folded=true`
+   - 若会话已有历史，把当前追问改写为自包含问题（`rewrite_question`），改写结果**只用于检索**
+3. 混合召回：关键词（jieba + BM25）与语义（pgvector 余弦）两路并发召回候选（对改写后的问题）
+4. 对两路候选做 RRF 融合排序，过滤低相关分块，取 Top-K
+5. 可选：对候选做在线重排（qwen3-rerank），再收窄到 Top-K（调用失败回退原排序）
+6. 将「对话摘要 + 关键事实 + 最近原文窗口 + 检索片段 + 原始问题」组装成 Prompt
+7. LLM 流式生成，通过 SSE 返回前端
+8. 回答完成后保存消息与来源列表；**每轮抽取关键事实**更新 `conversations.key_facts`（非致命，失败保持原记忆）
 
 ### 关键设计决策
 
@@ -259,6 +276,9 @@ flowchart LR
 - **pgvector 选型**：业务数据 + 向量存在同一个 PostgreSQL，启动简单；中小规模知识库足够。若要海量向量，可替换为 Milvus / Qdrant，上层检索接口保持抽象。
 - **混合检索 + RRF（唯一检索方式）**：固定两路并发召回——jieba 分词 + BM25 召回精确关键词命中，pgvector 余弦（`similarity = 1 - distance`，阈值过滤）召回语义近似；两路各取 `BM25_RECALL_K` 个候选，并集后按 RRF `score = Σ 1/(k + rank)` 融合排序再取 `TOP_K`，两路同时命中的分块天然靠前。关键词通道可挽救语义低相似度命中，反之亦然。只保留一种模式，前端不再有模式切换。
 - **在线重排（可选，默认开）**：检索后对 `RERANK_CANDIDATES` 个候选用 DashScope `qwen3-rerank` 按 (问题, 分块) 相关性精排，再收窄到 `TOP_K` 进 Prompt；重排**非致命**——调用失败自动回退原召回顺序，问答不受影响。重排分数写入 `sources.similarity`，与最终排序口径一致。
+- **上下文窗口管理（对话历史压缩 + 关键信息抽取）**：多轮对话不再把全量原文塞进 Prompt，而是维护 `conversations.summary`（滚动摘要）+ `conversations.key_facts`（长期关键事实）+ 最近 `memory_recent_rounds` 轮原文窗口，长对话下历史 Token 从「随轮数线性增长」压成「有界」；每轮用同一次 `maintain_memory` 调用同时滚动摘要与抽取事实（用户偏好 / 确认参数 / 结论）。压缩、抽取、改写全部复用 `LLM.stream_chat` 收集文本，**非致命**——失败静默回退，主回答不受影响。
+- **查询改写（指代消解，仅用于检索）**：多轮追问（如"那 overlap 呢？"）先改写为自包含问题再去 embed / 检索 / 重排，让指代能命中正确分块；生成 Prompt 仍用原始问题 + 记忆块，由模型结合上下文理解，不改写结果。
+- **折叠不丢历史**：只有记忆维护成功（LLM 返回可解析的摘要）才把消息标 `is_folded=true` 并折叠，绝不把历史折叠进空摘要；被折叠消息前端照常展示，只是不再进 LLM Prompt。
 - **防幻觉**：Prompt 只包含检索命中的分块并强制要求标注 `[1]`、`[2]` 编号；无依据时直接返回 `no_evidence`，不调用模型编造。
 - **可追溯**：`messages.sources`(jsonb) 记录每个回答引用的文档 / 分块 / 相似度 / 片段。
 - **Provider 抽象**：`EMBEDDING_BASE_URL` / `LLM_BASE_URL` / `RERANK_BASE_URL` 可切换不同在线服务商，业务代码零改动。
@@ -342,6 +362,17 @@ flowchart LR
 
 支持新建会话、清空当前对话。
 
+#### F2.6 上下文窗口管理（对话记忆）
+
+多轮对话下自动压缩历史、抽取关键信息，控制进入大模型的历史 Token。
+
+验收标准：
+- 默认开启（`MEMORY_ENABLED=true`），可整开关闭，关闭后行为与纯单轮一致
+- 每轮回答后抽取关键事实，写入 `conversations.key_facts`（可通过 psql 确认）
+- 未折叠原文窗口估算 token 超过 `memory_recent_tokens`（默认 1200）时，触发滚动压缩：最旧几轮折叠进 `conversations.summary`，对应消息 `is_folded=true`，最近 `memory_recent_rounds`（默认 2）轮原文保留
+- 多轮追问自动改写为自包含问题再检索（指代消解），改写结果不影响生成
+- 压缩 / 抽取 / 改写任一失败均静默回退，不产生 `error` 事件、不影响主回答
+
 ### F3 会话管理
 
 - 展示历史会话标题与最近更新时间
@@ -392,6 +423,8 @@ flowchart LR
 7. 删除一个文档后，再提问相关内容，答案中不再引用它
 8. 停止并重启服务，数据仍存在，证明 PostgreSQL 持久化
 9. 打开 `/docs`，FastAPI 自动生成的接口文档可正常访问
+10. 连续追问（"分块策略默认参数？" → "那 overlap 呢？"），第二条能正确检索并回答（改写生效）
+11. 长对话后 psql 确认 `conversations.key_facts` 有事实、早期 `messages.is_folded=true`、`conversations.summary` 非空
 
 ## 面试讲解点
 
@@ -404,6 +437,7 @@ flowchart LR
 7. **SSE 流式输出**：相比一次性返回的用户体验优势与实现方式
 8. **异步与失败处理**：入库任务的状态机、失败重试
 9. **数据一致性**：删除文档时级联删除向量，保证检索结果干净
+10. **上下文窗口管理**：长对话为什么不能把全量原文都塞进 Prompt——Token 随轮数线性增长且有效上下文有限；如何用「滚动摘要 + 关键事实 + 最近原文窗口」把历史压成有界，用改写解决追问指代消解，并解释为什么压缩/抽取/改写都设计成非致命降级、以及「折叠绝不丢历史」的取舍
 
 ## 建议开发顺序
 

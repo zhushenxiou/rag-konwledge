@@ -58,6 +58,6 @@ cd frontend && pnpm dev
 ## 8. 测试
 
 ```powershell
-python -m pytest -q                       # 26 个用例，独立 rag_kb_test 库，不触网/不调模型
+python -m pytest -q                       # 32 个用例，独立 rag_kb_test 库，不触网/不调模型
 python scripts/e2e_verify.py              # 端到端验收（含真实模型调用，需后端已启动）
 ```

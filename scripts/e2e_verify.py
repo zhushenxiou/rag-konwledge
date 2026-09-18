@@ -1,16 +1,29 @@
 """端到端验收脚本：对照 README「Demo 验收清单」（去前端项）逐项验证。
 
 用 urllib 直连本地 API（本机 httpx->localhost 有 502 怪癖）。
-用法: conda run -n langchain python e2e_verify.py
+
+前置：服务需以 AUTH_CAPTCHA_BYPASS=true 启动。本脚本是**跨进程**的黑盒客户端，
+读不出图片验证码；开启该开关后 /api/auth/captcha 会额外返回明文 code 供脚本登录。
+
+用法:
+    AUTH_CAPTCHA_BYPASS=true python -m uvicorn app.main:app --port 8000
+    conda run -n langchain python scripts/e2e_verify.py
 """
 import json
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 
 BASE = "http://localhost:8000"
 ROOT = Path(__file__).resolve().parent.parent
+
+# 演示固定账号；与 app/config.py 的 AUTH_USERNAME / AUTH_PASSWORD 默认值一致
+AUTH_USER = "zhuliang"
+AUTH_PASS = "zhuliang"
+
+_TOKEN: str | None = None  # 登录成功后填充，_req 统一带上
 
 
 def _boundary():
@@ -19,6 +32,9 @@ def _boundary():
 
 def _req(method, path, body=None, headers=None, raw=None, timeout=120):
     h = {"Content-Type": "application/json"} if body is not None else {}
+    if _TOKEN:
+        # 鉴权头单点注入，下面所有调用都不必各自处理
+        h["Authorization"] = f"Bearer {_TOKEN}"
     if headers:
         h.update(headers)
     data = body if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -27,6 +43,41 @@ def _req(method, path, body=None, headers=None, raw=None, timeout=120):
     r = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
     with urllib.request.urlopen(r, timeout=timeout) as resp:
         return resp.status, resp.headers, resp.read()
+
+
+def _req_tolerant(method, path, **kwargs):
+    """同 _req，但把 4xx/5xx 也当正常结果返回（供断言状态码），不抛异常。"""
+    try:
+        return _req(method, path, **kwargs)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read()
+
+
+def _login() -> dict:
+    """取验证码 → 换 token，返回验证码响应体。"""
+    global _TOKEN
+    st, _, body = _req("GET", "/api/auth/captcha")
+    captcha = json.loads(body)
+    code = captcha.get("code")
+    if not code:
+        print(
+            "[SKIP] /api/auth/captcha 未返回明文 code —— 服务端没开 AUTH_CAPTCHA_BYPASS=true。\n"
+            "       请用 AUTH_CAPTCHA_BYPASS=true 重启后端后重跑本脚本。"
+        )
+        raise SystemExit(2)
+    st, _, body = _req(
+        "POST",
+        "/api/auth/login",
+        {
+            "username": AUTH_USER,
+            "password": AUTH_PASS,
+            "captcha_id": captcha["captcha_id"],
+            "captcha_code": code,
+        },
+    )
+    assert st == 200, f"登录失败: {st} {body[:200]}"
+    _TOKEN = json.loads(body)["token"]
+    return captcha
 
 
 def _upload(path: Path):
@@ -48,10 +99,22 @@ def main():
         results.append((name, ok, detail))
         print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f"  -> {detail}" if detail else ""))
 
-    # ---- 0. 健康检查 ----
+    # ---- 0. 鉴权（未登录 -> 登录 -> 可访问）----
+    st, _, _ = _req_tolerant("GET", "/api/documents")
+    check("0.1 未登录访问业务接口被拒", st == 401, f"GET /api/documents -> {st}")
+
+    captcha = _login()
+    check("0.2 取到图片验证码", captcha.get("image", "").startswith("data:image/png;base64,"),
+          f"captcha_id={captcha.get('captcha_id')}")
+    check("0.3 登录换取 token", bool(_TOKEN))
+
+    st, _, _ = _req("GET", "/api/documents")
+    check("0.4 登录后可访问业务接口", st == 200, f"GET /api/documents -> {st}")
+
+    # ---- 0.5 健康检查 ----
     st, _, body = _req("GET", "/api/health")
     health = json.loads(body)
-    check("0. /api/health ok", st == 200 and health["status"] == "ok", f"status={st} db={health['database']}")
+    check("0.5 /api/health ok", st == 200 and health["status"] == "ok", f"status={st} db={health['database']}")
 
     # ---- 1. 上传 md + pdf（异步入库）----
     md, pdf = ROOT / "demo" / "sample.md", ROOT / "demo" / "sample.pdf"
@@ -130,7 +193,7 @@ def main():
     types = [e["type"] for e in events]
     check("7.2 删除后检索不再命中", "no_evidence" in types, f"types={types}")
 
-    # ---- 8. 接口文档 ----
+    # ---- 8. 接口文档（故意不带 token：验证 /docs 保持开放）----
     req = urllib.request.Request(BASE + "/docs", method="GET")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:

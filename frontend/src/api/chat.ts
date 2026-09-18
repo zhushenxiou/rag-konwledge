@@ -1,6 +1,7 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import type { ChatEvent } from '../types'
 import { ApiError } from './http'
+import { getToken, redirectToLogin } from '@/auth/token'
 
 /**
  * SSE 流式问答（基于 @microsoft/fetch-event-source）。
@@ -21,9 +22,16 @@ export async function streamChat(
   onEvent: (ev: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // 本文件是全站唯一绕过 axios 的请求（fetchEventSource），http.ts 的请求拦截器
+  // 覆盖不到，鉴权头必须在这里单独注入，否则问答会 401。
+  const token = getToken()
+
   await fetchEventSource('/api/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify({
       question,
       conversation_id: conversationId,
@@ -43,6 +51,8 @@ export async function streamChat(
         } catch {
           /* ignore */
         }
+        // 登录失效：与 axios 侧保持一致的跳转行为（这里没有 response 拦截器兜底）
+        if (res.status === 401) redirectToLogin()
         throw new ApiError(res.status, detail)
       }
       const ct = res.headers.get('content-type') ?? ''

@@ -27,6 +27,8 @@ copy .env.example .env
 ```
 
 > 关键项：`EMBEDDING_DIM` 必须与模型输出维度 / 数据库 `Vector(512)` 列一致；`RERANK_API_KEY` 留空则跳过在线重排。
+>
+> 登录相关（`AUTH_USERNAME` / `AUTH_PASSWORD` 等）**不用改**：默认就是演示账号 `zhuliang / zhuliang`。登录需要图片验证码，依赖 `pillow`（已列在 `requirements.txt`）。
 
 ## 5. 初始化数据库（幂等）
 
@@ -55,9 +57,21 @@ cd frontend && pnpm dev
 
 打开 <http://localhost:5173>（`/api` 自动代理到 :8000）。生产构建：`pnpm build`。
 
+未登录会被重定向到 `/login`，用演示账号 **zhuliang / zhuliang** + 页面上的四位数字验证码登录（点图片可换一张）。
+
 ## 8. 测试
 
 ```powershell
-python -m pytest -q                       # 32 个用例，独立 rag_kb_test 库，不触网/不调模型
+python -m pytest -q                       # 66 个用例，独立 rag_kb_test 库，不触网/不调模型
 python scripts/e2e_verify.py              # 端到端验收（含真实模型调用，需后端已启动）
 ```
+
+> `e2e_verify.py` 是跨进程黑盒脚本，读不出图片验证码，因此后端需以 `AUTH_CAPTCHA_BYPASS=true` 启动：
+
+```powershell
+$env:AUTH_CAPTCHA_BYPASS = "true"
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+> 该开关默认关闭（开启时启动会打 warning），仅本地自动化验收使用，**生产环境绝不可开启**。
+> 另外脚本第 1 步起依赖 `demo/sample.md`、`demo/sample.pdf`，这两个素材**仓库里没有**——鉴权与健康检查部分（步骤 0.1–0.5）可以正常跑完，后面的步骤跑不过去。

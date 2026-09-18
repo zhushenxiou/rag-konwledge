@@ -8,6 +8,7 @@ import {
   getMessages,
   listConversations,
 } from '@/api/conversations'
+import { isUnauthorized } from '@/api/http'
 import type { ChatEvent, ChatStatus, Conversation, DisplayMessage } from '@/types'
 import ChatInput from './components/ChatInput.vue'
 import ConversationPanel from './components/ConversationPanel.vue'
@@ -28,6 +29,9 @@ async function refreshConversations() {
   conversationsLoading.value = true
   try {
     conversations.value = await listConversations()
+  } catch (e) {
+    // 401 交给拦截器跳登录；其余错误提示一下，否则侧栏只会静默空白
+    if (!isUnauthorized(e)) ElMessage.error((e as Error).message)
   } finally {
     conversationsLoading.value = false
   }
@@ -152,8 +156,13 @@ async function loadConversation(conv: Conversation) {
     // 恢复会话状态：末条为无依据时头部 tag 与实时行为保持一致
     const last = messages.value[messages.value.length - 1]
     status.value = last?.noEvidence ? 'no_evidence' : messages.value.length ? 'done' : 'idle'
-  } catch {
-    // 忽略：历史加载失败时静默保留当前空状态
+  } catch (e) {
+    // 会话已切换却加载失败时，必须清空消息区，否则会留下「标题是新会话、
+    // 内容还是旧会话」的错位。401 由拦截器接管，不必再收尾。
+    if (isUnauthorized(e)) return
+    messages.value = []
+    status.value = 'error'
+    ElMessage.error(`加载会话失败：${(e as Error).message}`)
   }
 }
 
@@ -171,7 +180,12 @@ function onSelectConversation(id: string) {
 }
 
 async function onDeleteConversation(id: string) {
-  await removeConversation(id)
+  try {
+    await removeConversation(id)
+  } catch (e) {
+    if (!isUnauthorized(e)) ElMessage.error((e as Error).message)
+    return
+  }
   if (conversationId.value === id) newChat()
 }
 

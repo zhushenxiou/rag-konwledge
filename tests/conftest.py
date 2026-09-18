@@ -21,6 +21,10 @@ os.environ["RERANK_BASE_URL"] = "https://example.invalid/v1"
 # 对话记忆默认关闭：既有用例保持纯单轮（恰好 1 次 LLM 调用）；记忆用例显式传
 # memory_enabled=True 开启（memory.py 相关断言见 tests/test_memory.py）
 os.environ["MEMORY_ENABLED"] = "false"
+# 鉴权账号固定成 demo 默认值：环境变量优先级高于 .env，避免本地改过账号后用例漂移
+os.environ["AUTH_USERNAME"] = "zhuliang"
+os.environ["AUTH_PASSWORD"] = "zhuliang"
+os.environ["AUTH_CAPTCHA_BYPASS"] = "false"
 
 import pytest  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
@@ -100,3 +104,47 @@ def fake_llm():
 @pytest.fixture()
 def fake_reranker():
     return FakeReranker()
+
+
+# ---- 鉴权 ----
+@pytest.fixture()
+def anon_client():
+    """不带鉴权头的客户端，用于断言「未登录被拒」。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    return TestClient(app)
+
+
+@pytest.fixture()
+def auth_client():
+    """已登录客户端：其 headers 里带 Bearer token，可直接打受保护接口。
+
+    走的是真实链路（签发验证码 → 校验 → 发 token），只是绕过了"看图"这一步：
+    TestClient 与 app 同进程，共享 app.services.auth 的模块级 store，可直接拿到
+    验证码明文，不必 OCR、也不必把 store mock 掉。
+
+    刻意不复用 anon_client fixture —— 同一个 TestClient 实例改过 headers 就不再是
+    "匿名"的了，两个 fixture 同时请求时会互相污染。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+    from app.services import auth as auth_service
+
+    client = TestClient(app)
+    captcha_id, code, _ = auth_service.new_captcha()
+    resp = client.post(
+        "/api/auth/login",
+        json={
+            "username": settings.auth_username,
+            "password": settings.auth_password,
+            "captcha_id": captcha_id,
+            "captcha_code": code,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    client.headers["Authorization"] = f"Bearer {resp.json()['token']}"
+    return client

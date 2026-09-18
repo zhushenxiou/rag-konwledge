@@ -9,6 +9,7 @@ import {
   retryDocument,
   uploadDocument,
 } from '@/api/documents'
+import { isUnauthorized } from '@/api/http'
 import type { Document } from '@/types'
 import DocumentDetailDialog from './components/DocumentDetailDialog.vue'
 import DocumentTable from './components/DocumentTable.vue'
@@ -41,6 +42,11 @@ async function refresh(status?: string) {
   loading.value = true
   try {
     documents.value = await listDocuments(status)
+  } catch (e) {
+    // 失败必须停轮询：否则会变成每 1.5s 一次的错误风暴（会话失效时尤其明显）
+    stopAutoRefresh()
+    // 401 由 http.ts 拦截器统一跳登录，这里不重复弹提示
+    if (!isUnauthorized(e)) ElMessage.error((e as Error).message)
   } finally {
     loading.value = false
   }
@@ -134,7 +140,14 @@ async function onRemove(id: string) {
   } catch {
     return // 用户取消
   }
-  await remove(id)
+  // 注意这段在 confirm 的 try/catch 之外，必须单独兜住，否则删除失败时
+  // 只会走 Vue 的全局 errorHandler 打条日志，用户看不到任何原因
+  try {
+    await remove(id)
+  } catch (e) {
+    if (!isUnauthorized(e)) ElMessage.error((e as Error).message)
+    return
+  }
   if (detailId.value === id) detailId.value = null
 }
 

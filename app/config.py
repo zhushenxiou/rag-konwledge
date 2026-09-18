@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     memory_extract_every_turn: bool = True    # 每轮抽取关键事实（False → 仅压缩时抽取）
     memory_rewrite_enabled: bool = True       # 多轮时改写检索问题（指代消解）
 
+    # ---- 登录鉴权 ----
+    auth_username: str = "zhuliang"           # Demo 写死的单账号，可用 .env 覆盖
+    auth_password: str = "zhuliang"           # 明文存放：仅本地演示，生产必须改哈希存储
+    auth_token_ttl_minutes: int = 720         # token 有效期（分钟）；内存态，重启即全部失效
+    captcha_ttl_seconds: int = 120            # 验证码有效期（秒），且一次性
+    auth_captcha_bypass: bool = False         # 仅本地自动化验收：captcha 接口额外返回明文 code
+
     # ---- 测试 ----
     test_database_url: str = ""
 

@@ -108,6 +108,8 @@ copy .env.example .env   # 编辑 .env，至少填入 LLM_API_KEY、EMBEDDING_AP
 | `AUTH_CAPTCHA_BYPASS` | **仅本地自动化验收**：取验证码接口额外返回明文 `code`。生产必须保持 `false`，开启时后端启动会打 warning | `false` |
 
 > `EMBEDDING_DIM` 与数据库列维度强相关：换模型后需同时修改 `.env` 并重建表（删表后 `alembic upgrade head`）。
+>
+> **单请求条数上限无需配置**。DashScope 的 `text-embedding-v3/v4` 硬性要求单次请求 ≤10 条（与 token 多少无关，超了直接 `400 InvalidParameter: batch size is invalid`），而 v1/v2 是 25、OpenAI 是 2048。`OpenAICompatEmbedder` 不写死这个值，改为**运行时探测**：先整批发，被拒就在"已知可行 / 已知不可行"之间二分，收敛后记住该值供后续复用 —— 换厂商不用改任何配置。短文档一次成功、零探测开销；探测成本每个进程只付一次（200 chunk 的文档约 6 次试探请求）。
 
 前端启动：`cd frontend && pnpm install && pnpm dev`（:5173，`/api` 代理到 :8000）。
 
@@ -209,7 +211,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/conversations/{
 "C:/ProgramData/miniconda3/envs/langchain/python.exe" -m pytest -q
 ```
 
-66 个用例，覆盖：分块大小 / overlap / 句子边界、混合检索 Top-K 排序与阈值过滤、BM25 + 语义两路召回与 RRF 融合（含关键词通道挽救低相似度命中）、问答 SSE 事件与消息落库、无依据处理、在线重排（重排排序 / 失败回退）、文档入库状态机（成功与失败）、文档重命名（成功 / 空名 / 不存在）、**对话记忆**（每轮事实抽取 / 超预算滚动压缩 / 追问改写驱动检索 / 记忆调用失败回退 / 关闭时零额外调用 / token 估算）、**鉴权**（图片验证码格式 / 明文不外泄 / 一次性 / 过期 / 未知 id、登录成功 / 口令错 / 未知账号 / 非 ASCII 账号不 500、token 生命周期与登出撤销、**全部业务端点的未登录 401 回归网**）。测试使用独立的 `rag_kb_test` 库，Embedding / LLM / Rerank 均为 Fake 实现，**不触网、不下载模型**。
+78 个用例，覆盖：分块大小 / overlap / 句子边界、混合检索 Top-K 排序与阈值过滤、BM25 + 语义两路召回与 RRF 融合（含关键词通道挽救低相似度命中）、问答 SSE 事件与消息落库、无依据处理、在线重排（重排排序 / 失败回退）、文档入库状态机（成功与失败）、文档重命名（成功 / 空名 / 不存在）、**对话记忆**（每轮事实抽取 / 超预算滚动压缩 / 追问改写驱动检索 / 记忆调用失败回退 / 关闭时零额外调用 / token 估算）、**鉴权**（图片验证码格式 / 明文不外泄 / 一次性 / 过期 / 未知 id、登录成功 / 口令错 / 未知账号 / 非 ASCII 账号不 500、token 生命周期与登出撤销、**全部业务端点的未登录 401 回归网**）、**Embedding 自适应分批**（取数请求不越服务端上限 / 跨批顺序不乱 / **收敛到真实上限而非减半近似** / 探测成本是对数级 / 第二次调用零探测开销 / 短文档一次成功 / 小文档先行不会锁死批大小 / 上限为 1 能收敛 / 无法识别的 400 原样抛出不被误重试）。测试使用独立的 `rag_kb_test` 库，Embedding / LLM / Rerank 均为 Fake 实现，**不触网、不下载模型**。
 
 > 鉴权用例不去 OCR 图片：直接调 `services.auth.new_captcha()` 拿明文再走真实登录接口，签发 / 一次性 / 过期链路仍被真实覆盖。
 > 其中「未登录 401」的端点清单取自 OpenAPI，所以**新增接口会自动被纳入**——只要它忘了挂 `require_auth`，用例立刻变红。

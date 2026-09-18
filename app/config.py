@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_api_key: str = ""
     embedding_model_name: str = "text-embedding-v4"
+    # 注：单请求条数上限刻意**不做配置** —— 各厂商不一（DashScope v3/v4 为 10、
+    # v1/v2 为 25、OpenAI 为 2048），由 OpenAICompatEmbedder 运行时探测并记忆。
 
     # ---- LLM（OpenAI 兼容接口）----
     llm_base_url: str = "https://api.deepseek.com/v1"

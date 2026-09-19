@@ -24,7 +24,9 @@ Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogra
 
 ## Commands
 
-启动教程见根目录 `setup.md`（后端纯命令，不用 ps1 脚本）。
+启动教程见根目录 `setup.md`（后端纯命令，不用 ps1 脚本）。生产部署见 `deploy.md`（服务器上 `docker compose up -d`；**开发机不要用 compose**，理由见下方「部署」节）。
+
+- 部署: `docker compose build` → `docker compose up -d`；`docker compose logs -f backend`；`docker compose down`（**不加 `-v`**，会删数据卷）
 
 - 前端: `cd frontend && pnpm install && pnpm dev`（:5173，`/api` 代理到 :8000）· `pnpm build`（`vue-tsc -b && vite build`）
 - 后端（先 `conda activate langchain`，设 `$env:PYTHONIOENCODING="utf-8"` 避开 conda run 的 GBK 崩溃）:
@@ -33,6 +35,36 @@ Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogra
   - 测试: `python -m pytest -q`（122 tests; 独立 `rag_kb_test` DB, 不触网/不调模型）
   - 单个测试: `python -m pytest tests/test_chat.py::test_chat_no_evidence_when_nothing_retrieved -q`
   - E2E 验收（服务须已启动; 真实模型调用）: `python scripts/e2e_verify.py`。这是跨进程黑盒脚本，读不出图片验证码，**服务须以 `AUTH_CAPTCHA_BYPASS=true` 启动**（此时 `/api/auth/captcha` 额外返回明文 `code`）；没开则脚本打印提示并以退出码 2 结束。
+
+## 部署（Docker Compose，Ubuntu）
+
+生产部署走 `deploy.md`，全套是 `docker compose up -d`。artifact：
+
+- `Dockerfile` — 后端镜像。`python:3.13-slim`（**不用 alpine**：musl 下缺轮子会退化成源码编译）、非 root `appuser`、`ENV UPLOAD_DIR=/data/uploads`、**预建并 chown `/data/uploads`**、`ENTRYPOINT ["/bin/sh", "/app/deploy/backend-entrypoint.sh"]`。构建上下文 = 仓库根，靠 `.dockerignore` 挡住 `.env`（密钥会永久留在镜像层）与 `frontend/`（node_modules 182MB）。
+- `deploy/backend-entrypoint.sh` — 启动自检 → 有上限地等 DB → `init_db.py` → `alembic upgrade head` → `exec uvicorn`。用 POSIX `sh` 写（slim 里 `/bin/sh` 是 dash，**没装 bash**）。
+- `frontend/Dockerfile` — `node:22-alpine` 阶段装 **`pnpm@11.5.2`（与开发机一致）** → `pnpm install --frozen-lockfile` → `pnpm build` → 产物拷进 `nginx:alpine`。构建上下文 = `./frontend`。
+- `frontend/nginx.conf` — SPA 回退 + `/api/` 反代（`proxy_buffering off` / `gzip off` / 长 timeout，供 SSE）+ `client_max_body_size 12m`。**容器内 `listen 80` 是固定的**，对外端口由 compose 的 `HTTP_PORT`（默认 **82**）在宿主机侧映射，别把这里的 80 改成 82。同时写了 `listen [::]:80;` —— 因为镜像里那个负责补 IPv6 监听的 entrypoint 脚本已被删除（见下）。
+- **前端镜像删掉了 `/docker-entrypoint.d/10-listen-on-ipv6-by-default.sh`**。理由：它靠 `apk manifest nginx` 校验 `default.conf` 是否**仍等于原厂那份**，我们整体覆盖了该文件，它必然跳过、纯空转；而在某些环境（实测本机 Docker Desktop）`apk manifest` 会**无限挂住**，表现为 entrypoint 卡死、**nginx 主进程永不启动**，但容器状态是 `Up`、端口映射也正常 —— 连上去只是被立刻关闭，极难定位。删掉后 IPv6 由 `nginx.conf` 自己声明。
+- `docker-compose.yml` — `db` / `backend` / `web` 三服务 + `pgdata` / `uploads` 两个命名卷。
+- `.env.example` — **唯一的配置模板**（本地开发与服务器部署共用一份，别再拆成 dev/prod 两份）。本机开发的取值写在里面，容器里的三处差异项（`DATABASE_URL` / `UPLOAD_DIR` / `TEST_DATABASE_URL`）由 `docker-compose.yml` 的 `environment:` 段强制覆盖 —— 所以服务器上真正必须改的只有 `POSTGRES_PASSWORD` 与三个 API Key。
+- **构建期包索引走 `build.args`**：`PIP_INDEX_URL` / `NPM_REGISTRY` 由 compose 从 `.env` 传进两个 Dockerfile 的 `ARG`（默认值是官方源，`.env.example` 里给的是国内镜像）。**这两项是"不报错但极慢"型故障**：官方 PyPI CDN 实测 ~34 KB/s、npm ~227 KB/s，而 `curl https://pypi.org/` 会返回 200 让人误判为正常 —— 真正下载文件的是 `files.pythonhosted.org` / `registry.npmjs.org`。国内服务器上不改就是构建几十分钟起步。`docker manifest inspect` 同理，它不走 Docker Hub 镜像源，不能拿来判断加速器是否生效。
+- `scripts/deploy.sh` — **本机（Git Bash）跑的一键重新部署**，把当前工作区推上服务器重建。`deploy.md` 第 8 节是用法，实现取舍写在脚本头部注释里。三个易踩点：①打包清单用 `git ls-files --cached --others --exclude-standard`（内容读**工作区**、清单来自 git，所以未提交改动会进去、`.env`/`node_modules` 不会；**别改成 `git checkout-index`**，它导出的是索引版本，工作区改了还没 `git add` 的内容会静默丢失）；②GNU tar 的 `--exclude` 是**位置选项**，写在 `-T` 之后会被静默忽略；③过 ssh 的变量只能是**单字**（ssh 把 argv 用空格拼成命令串，多字变量会被远端 shell 当成第二条命令），且开了 `pipefail` 时 `grep` 无匹配的退出码 1 会直接杀掉脚本 —— 而"这次没有任何容器被重建"恰恰是最常见的一次部署。
+- `.deploy.env.example` / `.deploy.env` — 部署目标（服务器地址）。**真实 IP 只留在本机的 `.deploy.env` 里，刻意不写进脚本**：本仓库公开，把生产机 IP 连同"演示站 + 公开默认口令"一起提交等于给扫描器递名单。注意 `.deploy.env` **不受 `.gitignore` 里 `.env.*` 那条规则约束**（前缀是 `.deploy` 不是 `.env`），已单独列了一条。
+
+**部署侧不变量（改这些文件前先读）**：
+
+- **后端恒为单 worker、单副本**。token / 验证码在进程内存（`app/services/auth.py`），多 worker 会表现为「随机掉登录」。entrypoint 里刻意不写 `--workers`；`restart: unless-stopped` 下的每次重启也等于全体登出，这是既定行为不是 bug。
+- **PostgreSQL 18 镜像的数据目录是 `/var/lib/postgresql`（父目录）**，不是 `.../data` —— PG18 起 `PGDATA` 挪到了 `/var/lib/postgresql/18/docker`。命名卷挂到旧路径**不报错**，只是造个空目录、真实数据落进容器可写层，`down` 一次就没了。改 compose 时别"顺手改回去"。
+- **迁移与建库都在 entrypoint 里做**，因为 `app/main.py` 没有任何 startup/lifespan 钩子，且 `0001_initial.py` 用 `Vector(512)` 建列却**不建扩展** —— 漏掉就是「服务起得来、健康检查也过，一提问报 `type "vector" does not exist`」。
+- **`init_db.py` 只要 `TEST_DATABASE_URL` 非空就会连它**，容器里 `localhost` 指向容器自己 → 未捕获异常 → entrypoint 中断 → 无限崩溃循环。以前这是「照抄 `.env.example` 就炸」最典型的一条，现在**由 compose 的 `TEST_DATABASE_URL: ""` 强制置空兜住**（`environment:` 优先级高于 `env_file`）—— 改动 compose 时别把这三项删掉，删了就会退回成"靠文档提醒"。
+- **healthcheck 不能只看 HTTP 状态码**：`app/api/health.py` 的 `status` 恒为 `"ok"`，DB 挂了也只把 `database` 置 `error`，HTTP 仍是 200。compose 里的探针解析 JSON 的 `database` 字段。且 `python:3.13-slim` **没有 curl/wget**，探针只能用 python。
+- **`db` 不 publish 5432**（宿主机已装 PG 占着），**`backend` 不 publish 8000**（否则 `/docs` 绕过 nginx 裸奔），只用 `expose`。
+- **`UPLOAD_DIR` 是绝对路径 `/data/uploads`**，且 `documents.file_path` 落库的就是这个字符串 —— 换挂载点会让旧记录全部指向不存在的文件。数据库与 uploads 卷必须一起备份、一起恢复。
+- **演示账号钉死、所有环境一致**（本机 conda、容器、服务器都是同一个账号，见 `.env` 的 `AUTH_*`，也正是 `app/config.py` 的默认值）。用户明确要求如此，**别再提议"改掉默认口令"**：入口从"必须改"变成了"可以去改，但没有任何东西会提醒你改漏了"。代价是 `extra="ignore"` 会让 `AUTH_PASSWORD` 拼错时静默回落默认值，等于「改了口令但没生效」，**唯一核对手段是启动日志里那行脱敏摘要（`auth_user=`）**。entrypoint 现在只拦 `AUTH_CAPTCHA_BYPASS=true`（会让验证码形同虚设）；`AUTH_PASSWORD` 被显式设成空串时打 WARN 但不拦。**口令字面值只存在于 `.env` 与 `app/config.py` 的默认值里，文档（含本文件）一律不抄写它** —— 用户明确要求，别再往 md 里写。**副作用**：`scripts/e2e_verify.py` 依赖那个 bypass 开关，所以它**无法针对容器化部署运行** —— 要跑端到端验收得按 `setup.md` 在开发机用 conda 起后端。这是刻意的取舍（容器即生产路径），改 entrypoint 前先想清楚这点。
+- **`frontend/src/auto-imports.d.ts` 与 `components.d.ts` 必须保持入库**：`vue-tsc -b` 不加载 `vite.config.ts`、不会重新生成它们，一旦被 gitignore，干净 clone 下 `pnpm build`（即镜像构建）会以一堆 `Cannot find name 'ref'` 失败。
+- **`*.sh` 必须 LF**（`.gitattributes` 里 `*.sh text eol=lf`）。CRLF 的 `#!/bin/sh` 在 Linux 容器里报 `bad interpreter`，且只在别的机器上复现。
+
+`docker compose` **是服务器路径，本地开发请走 `setup.md` 的 conda 方式**：镜像里的代码是 `COPY` 进去的，改一行就得重建镜像，迭代极慢；而且本机那套库与容器内 `db` 卷是**两份数据**，来回切很容易看错。注意本机 `.env` 现在**也带了 `POSTGRES_*`**（值指向本机预演用的库），所以 `docker compose up -d` 在开发机上**是能跑起来的** —— 别指望它报错拦你，克制靠自觉。compose 用的是 `${VAR:?...}` 强制变量语法（默认语法只会打 warning 然后替换成空串继续跑，把「空口令」这种错误埋进日志），键名写错/漏写会在这里响亮失败。
 
 ## Architecture
 
@@ -52,7 +84,7 @@ Enterprise knowledge-base Q&A system (企业知识库问答系统) at `webprogra
 - `app/providers/` — `Embedder` (OpenAI-compatible, 千问 DashScope), `LLM` (OpenAI-compatible) and `Reranker` (DashScope `qwen3-rerank`, httpx POST `{rerank_base_url}/reranks`) protocol abstractions. `get_embedder()` / `get_llm()` / `get_reranker()` factories (lru_cached); provider is switched via `EMBEDDING_BASE_URL`/`LLM_BASE_URL`/`RERANK_BASE_URL` env config with zero business-code changes. No local model code.
 - `app/models.py` — `Document` / `Chunk` / `Conversation` / `Message`. `Chunk.embedding` is a pgvector `Vector(settings.embedding_dim)` column; `chunk_metadata` maps to DB column `metadata` (avoids a Declarative reserved name). `Conversation.summary` (Text) / `Conversation.key_facts` (JSONB) 与 `Message.is_folded` (Boolean) 是对话记忆列，仅后端 Prompt 使用、前端不展示。
 - `app/database.py` — engine, `SessionLocal`, `Base`, `get_db`.
-- `app/config.py` — pydantic-settings, all config from `.env` / env vars. 含 `# ---- 对话记忆 ----` 配置组 (`memory_enabled` / `memory_recent_tokens` / `memory_recent_rounds` / `memory_max_facts` / `memory_extract_every_turn` / `memory_rewrite_enabled`) 与 `# ---- 登录鉴权 ----` 配置组 (`auth_username` / `auth_password` 默认即演示账号 `zhuliang`，`auth_token_ttl_minutes` / `captcha_ttl_seconds` / `auth_captcha_bypass`)。账号口令写在配置默认值里等价于"写死"，但**不散落在业务代码中**，`.env` 可覆盖。
+- `app/config.py` — pydantic-settings, all config from `.env` / env vars. 含 `# ---- 对话记忆 ----` 配置组 (`memory_enabled` / `memory_recent_tokens` / `memory_recent_rounds` / `memory_max_facts` / `memory_extract_every_turn` / `memory_rewrite_enabled`) 与 `# ---- 登录鉴权 ----` 配置组 (`auth_username` / `auth_password` 默认即 `.env` 里那个演示账号，`auth_token_ttl_minutes` / `captcha_ttl_seconds` / `auth_captcha_bypass`)。账号口令写在配置默认值里等价于"写死"，但**不散落在业务代码中**，`.env` 可覆盖。
 - `alembic/versions/` — `0001_initial.py` (4 tables, `Vector(512)`), `0002_hnsw_index.py` (HNSW cosine index on `chunks.embedding`), `0003_message_retrieval_mode.py` + `0004_drop_message_retrieval_mode.py` (曾记录 `messages.retrieval_mode`，检索固定混合后已删除该列), `0005_conversation_memory.py` (加 `conversations.summary` / `key_facts` / `messages.is_folded`).
 
 ### Backend invariants / gotchas

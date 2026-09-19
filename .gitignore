@@ -6,7 +6,17 @@ venv/
 *.egg-info/
 
 # 环境变量（含 API Key）
+# 用 .env* 而不是只写 .env：`.env` 这条规则**匹配不到** .env.local / .env.prod
+# 这类文件（gitignore 的 . 不是通配符），它们会以未跟踪状态一直挂在 git status 里，
+# 早晚被一次 `git add .` 带进仓库。唯一的模板用 `!` 显式放行。
 .env
+.env.*
+!.env.example
+
+# 部署目标（服务器 IP）。**不属于 .env.* 那条规则** —— 它叫 .deploy.env，
+# 前缀是 .deploy 不是 .env，别以为上面那条已经覆盖了它。
+# 模板 .deploy.env.example 不在忽略之列（模式是精确名，不匹配 .example 结尾）。
+.deploy.env
 
 # 数据与上传文件
 data/

@@ -44,10 +44,17 @@ rag-konwledge/
 │   ├── install_pgvector.ps1  # 安装 pgvector 预编译包到 PostgreSQL 18
 │   ├── init_db.py            # 建库 + CREATE EXTENSION vector
 │   └── e2e_verify.py         # 端到端验收脚本（对照 README「Demo 验收清单」，需服务已启动）
-├── setup.md                  # 环境搭建与启动教程
+├── setup.md                  # 环境搭建与启动教程（本机 Windows 开发）
 ├── frontend/                 # 前端（Vite + Vue3 + vue-router + Tailwind v4）
-└── tests/                    # pytest：分块 / 检索 / 问答 / 鉴权 全链路（Fake 注入）
+├── tests/                    # pytest：分块 / 检索 / 问答 / 鉴权 全链路（Fake 注入）
+├── Dockerfile                # 后端镜像（python:3.13-slim + 非 root + 预建 /data/uploads）
+├── docker-compose.yml        # 生产栈：db(pgvector) + backend + web(nginx)
+├── .dockerignore  .gitattributes  .env.example（唯一配置模板，开发与部署共用）
+├── deploy/                   # backend-entrypoint.sh（等 DB → 建库建扩展 → 迁移 → 起服务）
+└── deploy.md                 # 生产部署手册（Ubuntu + Docker Compose）
 ```
+
+前端镜像相关：`frontend/Dockerfile`（node 构建 → nginx:alpine）、`frontend/nginx.conf`（SPA 回退 + `/api` 反代，含 SSE 免缓冲配置）。
 
 前端目录结构：
 
@@ -67,7 +74,9 @@ frontend/
 
 ## 快速开始
 
-完整搭建与启动教程见 [setup.md](setup.md)：pgvector 安装 → 依赖 → `.env` 配置 → 初始化数据库 → 启动后端（纯命令）→ 启动前端（pnpm）→ 测试。
+本地开发（Windows）的完整搭建与启动教程见 [setup.md](setup.md)：pgvector 安装 → 依赖 → `.env` 配置 → 初始化数据库 → 启动后端（纯命令）→ 启动前端（pnpm）→ 测试。
+
+服务器部署（Ubuntu + Docker）见 [deploy.md](deploy.md)。
 
 ### 环境变量参考
 
@@ -101,11 +110,15 @@ copy .env.example .env   # 编辑 .env，至少填入 LLM_API_KEY、EMBEDDING_AP
 | `MEMORY_MAX_FACTS` | 关键事实条目上限（超限由 LLM 在更新时裁剪） | `20` |
 | `MEMORY_EXTRACT_EVERY_TURN` | 每轮抽取关键事实（`false` → 仅压缩时抽取） | `true` |
 | `MEMORY_REWRITE_ENABLED` | 多轮时改写检索问题（指代消解；改写只用于检索） | `true` |
-| `AUTH_USERNAME` | **演示固定账号**，公网部署前必须改 | `zhuliang` |
-| `AUTH_PASSWORD` | **演示固定口令（明文）**，公网部署前必须改成哈希存储 | `zhuliang` |
+| `AUTH_USERNAME` | **演示账号，所有环境统一**（本地 / 容器 / 服务器都是它） | 见 `.env` |
+| `AUTH_PASSWORD` | **演示口令（明文）**，同上 | 见 `.env` |
 | `AUTH_TOKEN_TTL_MINUTES` | 登录 token 有效期（分钟） | `720` |
 | `CAPTCHA_TTL_SECONDS` | 验证码有效期（秒），且一次性 | `120` |
-| `AUTH_CAPTCHA_BYPASS` | **仅本地自动化验收**：取验证码接口额外返回明文 `code`。生产必须保持 `false`，开启时后端启动会打 warning | `false` |
+| `AUTH_CAPTCHA_BYPASS` | **仅本地自动化验收**：取验证码接口额外返回明文 `code`。默认 `false`；容器化部署的 entrypoint 会**拒绝以 `true` 启动** | `false` |
+
+> `AUTH_*` 之所以敢在所有环境用同一个口令，是因为本项目定位是演示、**不该放任何真实文档**。
+> 想换口令就改这两行，但留意 `extra="ignore"` 会把键名拼错的项静默吞掉 ——
+> 改完要核对后端启动日志 `配置:` 那行的 `auth_user=`，别只看 `.env`。
 
 > `EMBEDDING_DIM` 与数据库列维度强相关：换模型后需同时修改 `.env` 并重建表（删表后 `alembic upgrade head`）。
 >
@@ -514,7 +527,7 @@ flowchart LR
 
 1. 启动 PostgreSQL、后端、前端
 2. 未登录直接访问 `/chat` 或 `/documents`，被重定向到登录页
-3. 在登录页输入 `zhuliang / zhuliang` + 图中验证码，登录成功并回跳原页面；点验证码图片能换一张
+3. 在登录页输入 `.env` 中 `AUTH_USERNAME` / `AUTH_PASSWORD` 对应的账号 + 图中验证码，登录成功并回跳原页面；点验证码图片能换一张
 4. 登录后刷新页面仍是登录态；退出登录后回到登录页，且浏览器后退无法绕过
 5. 上传一份 PDF 和一份 Markdown，状态变为 `ready`
 6. 在数据库中确认 `documents`、`chunks` 和向量已写入
@@ -565,15 +578,38 @@ flowchart LR
 
 **鉴权相关的已知限制**（演示定位下有意接受，真实场景必须处理）：
 
-- **账号口令硬编码且明文比对**：`zhuliang / zhuliang` 写在 `config.py` 默认值里。任何拿到源码的人都能登录；真实场景应改为用户表 + 哈希存储（bcrypt / argon2）。
+- **账号口令硬编码且明文比对**：演示账号口令写在 `app/config.py` 的默认值里（与 `.env` 的 `AUTH_*` 同值）。任何拿到源码的人都能登录；真实场景应改为用户表 + 哈希存储（bcrypt / argon2）。
 - **明文 HTTP**：本地演示走 localhost 无妨；对外部署必须加 TLS，否则口令与 token 会被嗅探。
 - **token 存内存**：**后端一重启全体登出**，且 `uvicorn --workers > 1` 时各 worker 不共享（A 签发的 token 到 B 校验必然 401）。本项目按单 worker 运行（启动命令不带 `--workers`）。要持久化/共享应换 Redis 或 DB 表。
 - **无登录失败锁定**：验证码把单次猜测的成本抬到"必须重新取一张图"，但没有 IP 维度的失败计数与锁定，弱口令仍可被慢速爆破。
-- **`AUTH_CAPTCHA_BYPASS=true` 是后门**：开启后取验证码接口会回显明文，验证码形同虚设。默认关闭，仅本地自动化验收使用，后端启动会打 warning。
+- **`AUTH_CAPTCHA_BYPASS=true` 是后门**：开启后取验证码接口会回显明文，验证码形同虚设。默认关闭，仅本地自动化验收使用；容器化部署的 entrypoint 会拒绝以它启动。
 - **token 存 localStorage**：XSS 可窃取。本仓库无 `v-html`、无第三方脚本，XSS 面基本为零；若要进一步收紧可换 httpOnly Cookie，但需配套 SameSite / CSRF token。
 
+**部署相关的已知限制**（`deploy.md` 里的 Docker Compose 方案，同样是演示定位下的取舍）：
+
+- **没有 TLS，口令与 token 明文过网；且口令是固定不变的演示口令**（与 `app/config.py` 默认值同值，所有环境一致），任何拿到源码的人都能直接登进来；明文 HTTP 下中间节点也能读走 `Authorization: Bearer <token>`。**结论：这套部署的鉴权只防"误入"、不防"有意访问"，不要放真实文档**。要闭环需 HTTPS（域名 + certbot），属后续增量。
+- **`/docs`、`/openapi.json` 公网可达**，暴露全部接口结构；`/api/health` 会回显所用模型与厂商（`embedding_base_url`、`llm_model`）。后端端口未 publish 到宿主机，这些只能经 nginx 的对外端口（默认 82）访问。
+- **后端只能单 worker / 单副本**：token 与验证码存在进程内存（见上条），加 worker 或副本会立刻表现为「随机掉登录」。镜像的启动命令刻意不带 `--workers`。
+- **`requirements.txt` 只有 `>=` 下界、没有上界**：前端有 `pnpm-lock.yaml` 兜着，后端没有 —— 同一份代码在不同时间构建可能装到不同依赖版本，构建验证通过的镜像不要无谓重建。
+- **后端重启 = 全体用户登出**：token 不落库（见上条），容器重启后所有人需重新登录。
+
+## 部署
+
+生产部署（Ubuntu + Docker Compose，含 pgvector 容器、nginx 托管前端与反代）见 **[`deploy.md`](deploy.md)**。
+
+要点：`docker compose up -d` 一条命令起全套；数据库与上传目录走命名卷持久化；镜像启动时自动建库、建 pgvector 扩展、跑 Alembic 迁移，不需要手工准备数据库。
+
+> 本机 Windows 开发仍按下面的 `setup.md` 走 conda 方式 —— compose 文件刻意在缺少 `POSTGRES_*` 配置时直接报错，不适用于开发机。
+
 ## 环境要求
+
+**本地开发（Windows）**
 
 - Windows 11，conda（`langchain` 环境），Python 3.13
 - PostgreSQL 18 + pgvector（`scripts/install_pgvector.ps1` 提供预编译安装）
 - 无需本地模型，配置 `EMBEDDING_API_KEY`（阿里云 DashScope）即可在线向量化
+
+**服务器部署（Ubuntu）**
+
+- Docker + Docker Compose v2（数据库、后端、前端都在容器里跑，**不需要**宿主机预装 PostgreSQL / Python / Node）
+- 见 [`deploy.md`](deploy.md)

@@ -1,0 +1,8 @@
+# Windows 仓库里保证 shell 脚本以 LF 检出。
+#
+# 背景：这个仓库在 Windows 上开发，但 deploy/backend-entrypoint.sh 要在 Linux 容器里
+# 执行。一旦被检出成 CRLF，内核会去找名为 `/bin/sh\r` 的解释器，报
+# "bad interpreter: No such file or directory"。
+# 这类问题最麻烦的地方是**只在别的机器上复现** —— 开发机上 git 的 autocrlf 配置
+# 可能把行尾转换掉，本地看着一切正常。
+*.sh text eol=lf

@@ -1,0 +1,14 @@
+# 构建上下文 = ./frontend（前端镜像用）。
+#
+# 关键是不能让开发机上的 node_modules 混进构建上下文：
+# 本机是 Windows，里面是 esbuild / rollup 的 .node 原生二进制，拷进 Linux 构建
+# 环境会覆盖掉容器内装好的依赖，报错是莫名其妙的 Exec format error。
+# dist 同理不必进上下文（镜像里会重新构建）。
+node_modules
+dist
+
+.vscode
+.git
+.gitignore
+Dockerfile
+.dockerignore

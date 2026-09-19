@@ -1,0 +1,124 @@
+# 生产部署栈：db（pgvector）+ backend（FastAPI/uvicorn）+ web（nginx 托管 dist + 反代 /api）
+#
+# 起停：  docker compose up -d
+#         docker compose down          # **绝不加 -v**，-v 会连数据卷一起删掉
+#
+# 完整步骤与排查见 deploy.md。变量从同目录的 .env 读取（compose 会自动加载它做插值）。
+
+services:
+  db:
+    # 钉到「扩展版本 + PG 大版本」的完整 tag，而不是浮动的 `pg18` / `latest`：
+    # 后者某次 docker pull 就会静默换掉 pgvector 扩展版本。
+    # 0.8.6 与本机开发环境的 pgvector 0.8.6（scripts/install_pgvector.ps1 里的 0.8.6_18）对齐。
+    image: pgvector/pgvector:0.8.6-pg18-trixie
+    restart: unless-stopped
+    environment:
+      # `${VAR:?err}` = 没设就直接报错退出。默认的 `${VAR}` 只会打一条 warning
+      # 然后**替换成空字符串**继续跑，于是 db 容器带着空口令启动、后端连不上，
+      # 而根因埋在几十行日志里。宁可在这里响亮地失败。
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER 未设置 —— 请从 .env.example 复制出 .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置 —— 请从 .env.example 复制出 .env}
+      # 预建业务库，让 init_db.py 里的 CREATE DATABASE 退化成幂等 no-op
+      POSTGRES_DB: ${POSTGRES_DB:-rag_kb}
+    volumes:
+      # ⚠️ 挂载点必须是 /var/lib/postgresql 这个**父目录**，不是 .../data。
+      # PostgreSQL 18 起官方镜像把 PGDATA 从 /var/lib/postgresql/data 挪到了
+      # /var/lib/postgresql/18/docker，镜像声明的 VOLUME 也跟着上移了。
+      # 照旧写 /var/lib/postgresql/data 不会报错，只会在那儿造一个空目录，真实数据
+      # 落在容器可写层 —— `docker compose down` 之后库就没了，而所有日志看起来都正常。
+      # 核对方式见 deploy.md「验证持久化」一节。
+      - pgdata:/var/lib/postgresql
+    # 刻意**不发布端口**。宿主机上已经装了 PostgreSQL 18 占着 5432：发布出去要么
+    # 端口冲突直接起不来，要么让人误连到宿主机那个没装 pgvector 的库。
+    # 需要在宿主机上连库就用：docker compose exec db psql -U postgres -d rag_kb
+    healthcheck:
+      # pg_isready **不校验目标库是否存在**，所以这里不会和「backend 启动时才建库」
+      # 构成死锁（换成 `psql -d rag_kb -c 'select 1'` 就会）。
+      # compose 文件里 `$` 要写成 `$$` 才是字面量，否则会被 compose 自己插值。
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 构建期包索引。默认官方 PyPI；**国内服务器必须改成国内镜像**，否则
+      # 官方 CDN 实测只有 ~34 KB/s，依赖装不完（见 deploy.md 第 0 节）。
+      # 取值放 .env，与其它配置同一个入口，改完 rebuild 即可。
+      args:
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 下面三项都是「本机开发 / 容器」取值必然不同、且搞错就静默出事的项。
+      # `environment:` 的优先级**高于** env_file，所以这里钉死之后，一份 .env
+      # 可以同时服务本机 conda 和容器，部署时不需要手改它们。
+      #
+      # 由 compose 从 POSTGRES_* 拼出来，让口令只有**一个**来源 ——
+      # 否则「改了 POSTGRES_PASSWORD 忘了同步 DATABASE_URL」是必然会发生的事故。
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-rag_kb}
+      # .env 里那份是 ./data/uploads（给本机用）。容器里必须是绝对路径：它同时是
+      # documents.file_path 落库的内容，跟着卷走，换挂载点会让旧记录全部指向不存在的文件。
+      UPLOAD_DIR: /data/uploads
+      # **必须置空**。init_db.py 只要发现它非空就会去连它；.env 里那份指向
+      # localhost:5432，在容器里 localhost 是容器自己（没有 PG）→ 未捕获异常 →
+      # entrypoint 中断 → restart 策略下无限崩溃循环。置空即跳过，测试库只在
+      # 开发机上建。这条以前靠在文档里写"★ 保持留空"，现在由 compose 兜住。
+      TEST_DATABASE_URL: ""
+    volumes:
+      # 挂到 /data（父目录）；上传目录 /data/uploads 由上面的 UPLOAD_DIR 指定。
+      # 挂在父目录上，首次创建卷时 Docker 会把镜像里 /data 的属主（appuser）一并带过来。
+      - uploads:/data
+    # 只对 compose 内网暴露，**不 publish 到宿主机**。一旦写成 `ports: 8000:8000`，
+    # /docs 与 /openapi.json 就绕过了 nginx 直接对公网裸奔。
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # 两个坑叠在这里：
+      # 1) python:3.13-slim 里**既没有 curl 也没有 wget**。用 curl 写探针会永远返回
+      #    127(command not found)，容器永远 unhealthy，web 的 depends_on 永不满足，
+      #    表现为 `docker compose up -d` 挂住、日志里只有一条很不显眼的 exec 错误。
+      #    所以用镜像自带的 python。
+      # 2) **不能只看 HTTP 状态码**：app/api/health.py 的 status 字段恒为 "ok"，
+      #    数据库挂了也只把 database 置成 "error"，HTTP 仍是 200。必须解析 JSON 里的
+      #    database 字段，否则数据库全挂时探针照样报绿、web 照样启动、把 502 暴露给用户。
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); sys.exit(0 if d.get('database')=='ok' else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # 给足起始时间：app/services/retrieval.py 在**模块导入期**就调用了
+      # jieba.initialize()（要加载词典），冷启动多花 1~3 秒；之后还要等 DB、
+      # 建库建扩展、跑迁移。给太短会在 uvicorn 还没监听时就被判失败。
+      start_period: 90s
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # 同上。npm 官方 registry 实测 ~227 KB/s，npmmirror 2.4 MB/s。
+      args:
+        NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}"
+    restart: unless-stopped
+    ports:
+      # 想换端口就设 HTTP_PORT（默认 82）。云控制台的安全组也要放行同一端口，
+      # 否则会出现「服务器上 curl 127.0.0.1 通、外网打不开」这种最常见的部署问题。
+      # 注意右边那个 `:80` 是**容器内** nginx 的监听端口（见 frontend/nginx.conf），
+      # 恒为 80，不要跟着改 —— 对外的 82 只是宿主机侧的映射。
+      - "${HTTP_PORT:-82}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  uploads:

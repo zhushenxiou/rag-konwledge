@@ -28,7 +28,7 @@ copy .env.example .env
 
 > 关键项：`EMBEDDING_DIM` 必须与模型输出维度 / 数据库 `Vector(512)` 列一致；`RERANK_API_KEY` 留空则跳过在线重排。
 >
-> 登录相关（`AUTH_USERNAME` / `AUTH_PASSWORD` 等）**不用改**：默认就是演示账号 `zhuliang / zhuliang`。登录需要图片验证码，依赖 `pillow`（已列在 `requirements.txt`）。
+> 登录相关（`AUTH_USERNAME` / `AUTH_PASSWORD` 等）**不用改**：用 `.env` 里已有的演示账号即可（不写也有默认值）。登录需要图片验证码，依赖 `pillow`（已列在 `requirements.txt`）。
 
 ## 5. 初始化数据库（幂等）
 
@@ -57,7 +57,7 @@ cd frontend && pnpm dev
 
 打开 <http://localhost:5173>（`/api` 自动代理到 :8000）。生产构建：`pnpm build`。
 
-未登录会被重定向到 `/login`，用演示账号 **zhuliang / zhuliang** + 页面上的四位数字验证码登录（点图片可换一张）。
+未登录会被重定向到 `/login`，用 `.env` 里 `AUTH_USERNAME` / `AUTH_PASSWORD` 的演示账号 + 页面上的四位数字验证码登录（点图片可换一张）。
 
 ## 8. 测试
 

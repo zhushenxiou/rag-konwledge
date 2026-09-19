@@ -1,0 +1,35 @@
+# 构建上下文 = 仓库根（backend 镜像用）。
+# 这份 ignore 解决两件事：
+#   1) 安全：.env 里是真实 API Key，一旦被 COPY 进镜像层就永久留在 `docker history`
+#      里，push 到任何 registry 即泄漏。
+#   2) 速度：frontend/node_modules 实测 182MB，不排除则每次构建都要整份传给 daemon。
+.git
+.gitignore
+.gitattributes
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+data/
+uploads/
+
+# 测试与评测数据（都不进运行镜像）
+tests/
+eval_data/
+.pytest_cache/
+**/__pycache__/
+*.py[cod]
+htmlcov/
+.coverage
+
+# 前端整个目录都不需要 —— backend 镜像只 COPY app/ alembic/ alembic.ini
+# scripts/ deploy/，而 frontend/ 是另一个构建上下文（见 docker-compose.yml）。
+frontend/
+
+# 文档
+README.md
+CLAUDE.md
+setup.md
+deploy.md

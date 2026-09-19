@@ -6,7 +6,7 @@ Demo 定位（单账号、单进程），刻意不引入 JWT / Redis / 密码哈
   1) 后端重启 → 全体登出（前端拿到 401 会干净地跳回登录页）；
   2) uvicorn 多 worker 之间不共享（本服务按单 worker 运行）。生产环境应换成
      Redis 或 DB 表。
-- 口令来自 `settings.auth_username` / `auth_password`（默认 zhuliang/zhuliang），
+- 口令来自 `settings.auth_username` / `auth_password`（演示账号，见 `.env`；默认值在 config.py），
   以**明文**比对。Demo 可接受，真实场景必须存哈希（bcrypt/argon2）并走 HTTPS。
 
 线程安全：接口层全是同步函数、中间没有 `await` 让出点，单进程 asyncio 下
